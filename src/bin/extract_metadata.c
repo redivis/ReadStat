@@ -106,7 +106,7 @@ int handle_variable_sav(int index, readstat_variable_t *variable, const char *va
 
     add_val_labels(ctx, variable, val_labels);
     add_missing_values(ctx, variable);
-    
+
     fprintf(ctx->fp, "}");
     return 0;
 }
@@ -122,9 +122,11 @@ int handle_variable_dta(int index, readstat_variable_t *variable, const char *va
         type = "STRING";
     } else if (dta_date) {
         type = "DATE";
-    } else if (variable->type == READSTAT_TYPE_DOUBLE) {
+    } else if (variable->type == READSTAT_TYPE_DOUBLE || variable->type == READSTAT_TYPE_FLOAT) {
         type = "NUMERIC";
         decimals = extract_decimals(format, '%');
+    } else if (variable->type == READSTAT_TYPE_INT8 || variable->type == READSTAT_TYPE_INT16 || variable->type == READSTAT_TYPE_INT32){
+        type = "INTEGER";
     } else {
         fprintf(stderr, "%s:%d unhandled type %s\n", __FILE__, __LINE__, readstat_type_str(variable->type));
         exit(EXIT_FAILURE);
@@ -186,7 +188,7 @@ int pass(struct context *ctx, char *input, char *output, int pass) {
     } else if (pass == 2) {
         readstat_set_variable_handler(parser, &handle_variable);
     }
-    
+
     const char *filename = input;
     size_t len = strlen(filename);
 

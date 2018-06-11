@@ -27,8 +27,9 @@ void add_val_labels(struct context *ctx, readstat_variable_t *variable, const ch
     int dta_date = format && (strcmp(variable->format, "%td") == 0) && variable->type == READSTAT_TYPE_INT32;
     readstat_label_set_t * label_set = get_label_set(val_labels, ctx, 0);
     if (!label_set) {
-        fprintf(stderr, "Could not find label set %s!\n", val_labels);
-        exit(EXIT_FAILURE);
+        // fprintf(stderr, "Could not find label set %s!\n", val_labels);
+        return;
+        // exit(EXIT_FAILURE);
     }
     fprintf(ctx->fp, ", \"categories\": [");
     for (int i=0; i<label_set->value_labels_count; i++) {
@@ -88,6 +89,10 @@ void add_val_labels(struct context *ctx, readstat_variable_t *variable, const ch
             fprintf(ctx->fp, "{ \"code\": %s, \"label\": %s} ", stringkey, lbl);
             free(lbl);
             free(stringkey);
+        } else if (variable->type == READSTAT_TYPE_INT8 || variable->type == READSTAT_TYPE_INT16 || variable->type == READSTAT_TYPE_INT32){
+            char* lbl = quote_and_escape(value_label->label);
+            fprintf(ctx->fp, "{ \"code\": %i, \"label\": %s} ", value_label->int32_key, lbl);
+            free(lbl);
         } else {
             fprintf(stderr, "%s:%d Unsupported type %d\n", __FILE__, __LINE__, variable->type);
             exit(EXIT_FAILURE);
