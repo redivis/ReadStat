@@ -301,29 +301,29 @@ static int handle_variable_dta(int index, readstat_variable_t *variable, const c
     int decimals = -1;
 
     switch (readstat_variable_get_type_class(variable)) {
-    case READSTAT_TYPE_CLASS_STRING:
-        type = EXTRACT_METADATA_TYPE_STRING;
-        break;
-    case READSTAT_TYPE_CLASS_NUMERIC:
-        type = EXTRACT_METADATA_TYPE_NUMERIC;
+        case READSTAT_TYPE_CLASS_STRING:
+            type = EXTRACT_METADATA_TYPE_STRING;
+            break;
+        case READSTAT_TYPE_CLASS_NUMERIC:
+            type = EXTRACT_METADATA_TYPE_NUMERIC;
 
-        // Extract format
-        // Pattern formats: https://unicode.org/reports/tr35/tr35-dates.html#Date_Format_Patterns
-        if (vformat) {
-            if (strcmp(vformat, "%d") == 0) {
-                format = EXTRACT_METADATA_FORMAT_DATE;
-            } else if (strcmp(vformat, "%td") == 0) {
-                format = EXTRACT_METADATA_FORMAT_DATE_TIME;
+            // Extract format
+            // Pattern formats: https://unicode.org/reports/tr35/tr35-dates.html#Date_Format_Patterns
+            if (vformat) {
+                if (strcmp(vformat, "%d") == 0) {
+                    format = EXTRACT_METADATA_FORMAT_DATE;
+                } else if (strcmp(vformat, "%td") == 0) {
+                    format = EXTRACT_METADATA_FORMAT_DATE_TIME;
+                }
+            } else {
+                format = EXTRACT_METADATA_FORMAT_NUMBER;
+                decimals = extract_decimals(vformat, '%');
             }
-        } else {
-            format = EXTRACT_METADATA_FORMAT_NUMBER;
-            decimals = extract_decimals(vformat, '%');
-        }
-        break;
-    default:
-        fprintf(stderr, "%s:%d unhandled type %s\n", __FILE__, __LINE__, readstat_type_str(variable->type));
-        exit(EXIT_FAILURE);
-        break;
+            break;
+        default:
+            fprintf(stderr, "%s:%d unhandled type %s\n", __FILE__, __LINE__, readstat_type_str(variable->type));
+            exit(EXIT_FAILURE);
+            break;
     }
 
     if (ctx->count == 0) {
