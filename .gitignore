@@ -45,3 +45,4 @@ test_double_decimals
 *.csv
 *.json
 *.py
+generate_corpus
