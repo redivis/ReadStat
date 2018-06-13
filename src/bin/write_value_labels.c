@@ -93,7 +93,11 @@ void add_val_labels(struct context *ctx, readstat_variable_t *variable, const ch
             char* lbl = quote_and_escape(value_label->label);
             fprintf(ctx->fp, "{ \"code\": %i, \"label\": %s} ", value_label->int32_key, lbl);
             free(lbl);
-        } else {
+        } else if (variable->type == READSTAT_TYPE_FLOAT){
+			char* lbl = quote_and_escape(value_label->label);
+            fprintf(ctx->fp, "{ \"code\": %i, \"label\": %s} ", value_label->int32_key, lbl);
+            free(lbl);
+		} else {
             fprintf(stderr, "%s:%d Unsupported type %d\n", __FILE__, __LINE__, variable->type);
             exit(EXIT_FAILURE);
         }
