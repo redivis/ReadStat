@@ -77,7 +77,8 @@ static int extract_decimals(const char *s, char prefix) {
             return decimals;
         }
         fprintf(stderr, "%s:%d not a number: %s\n", __FILE__, __LINE__, &s[1]);
-        exit(EXIT_FAILURE);
+		return -1;
+        // exit(EXIT_FAILURE);
     } else {
         return -1;
     }
