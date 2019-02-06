@@ -198,6 +198,26 @@ typedef struct readstat_variable_s {
     int                     index_after_skipping;
 } readstat_variable_t;
 
+typedef struct readstat_schema_entry_s {
+    int                 row;
+    int                 col;
+    int                 len;
+    int                 skip;
+    readstat_variable_t variable;
+    char                labelset[32];
+    char                decimal_separator;
+} readstat_schema_entry_t;
+
+typedef struct readstat_schema_s {
+    char                    filename[255];
+    int                     rows_per_observation;
+    int                     cols_per_observation;
+    int                     first_line;
+    int                     entry_count;
+    char                    field_delimiter;
+    readstat_schema_entry_t *entries;
+} readstat_schema_t;
+
 /* Value accessors */
 readstat_type_t readstat_value_type(readstat_value_t value);
 readstat_type_class_t readstat_value_type_class(readstat_value_t value);
@@ -352,6 +372,7 @@ readstat_error_t readstat_set_handler_character_encoding(readstat_parser_t *pars
 
 readstat_error_t readstat_set_row_limit(readstat_parser_t *parser, long row_limit);
 
+/* Parse binary / portable files */
 readstat_error_t readstat_parse_dta(readstat_parser_t *parser, const char *path, void *user_ctx);
 readstat_error_t readstat_parse_sav(readstat_parser_t *parser, const char *path, void *user_ctx);
 readstat_error_t readstat_parse_por(readstat_parser_t *parser, const char *path, void *user_ctx);
@@ -359,6 +380,20 @@ readstat_error_t readstat_parse_sas7bdat(readstat_parser_t *parser, const char *
 readstat_error_t readstat_parse_sas7bcat(readstat_parser_t *parser, const char *path, void *user_ctx);
 readstat_error_t readstat_parse_xport(readstat_parser_t *parser, const char *path, void *user_ctx);
 
+/* Parse a schema file... */
+readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
+    const char *filepath, void *user_ctx, readstat_error_t *outError);
+readstat_schema_t *readstat_parse_spss_commands(readstat_parser_t *parser,
+    const char *filepath, void *user_ctx, readstat_error_t *outError);
+readstat_schema_t *readstat_parse_stata_dictionary(readstat_parser_t *parser,
+    const char *filepath, void *user_ctx, readstat_error_t *outError);
+
+/* ... then pass the schema to the plain-text parser ... */
+readstat_error_t readstat_parse_txt(readstat_parser_t *parser, const char *filename, 
+        readstat_schema_t *schema, void *user_ctx);
+
+/* ... and free the schema structure */
+void readstat_schema_free(readstat_schema_t *schema);
 
 /* Internal module callbacks */
 typedef struct readstat_string_ref_s {
@@ -478,8 +513,10 @@ void readstat_variable_set_label_set(readstat_variable_t *variable, readstat_lab
 void readstat_variable_set_measure(readstat_variable_t *variable, readstat_measure_t measure);
 void readstat_variable_set_alignment(readstat_variable_t *variable, readstat_alignment_t alignment);
 void readstat_variable_set_display_width(readstat_variable_t *variable, int display_width);
-void readstat_variable_add_missing_double_value(readstat_variable_t *variable, double value);
-void readstat_variable_add_missing_double_range(readstat_variable_t *variable, double lo, double hi);
+readstat_error_t readstat_variable_add_missing_double_value(readstat_variable_t *variable, double value);
+readstat_error_t readstat_variable_add_missing_double_range(readstat_variable_t *variable, double lo, double hi);
+readstat_error_t readstat_variable_add_missing_string_value(readstat_variable_t *variable, const char *value);
+readstat_error_t readstat_variable_add_missing_string_range(readstat_variable_t *variable, const char *lo, const char *hi);
 readstat_variable_t *readstat_get_variable(readstat_writer_t *writer, int index);
 
 // "Notes" appear in the file metadata. In SPSS these are stored as
