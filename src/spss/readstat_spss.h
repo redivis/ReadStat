@@ -70,7 +70,8 @@ typedef struct spss_varinfo_s {
     int              n_segments;
     int              n_missing_values;
     int              missing_range;
-    double           missing_values[3];
+    double           missing_double_values[3];
+    char             missing_string_values[3][4*8+1];
     char             name[8*4+1];
     char             longname[64*4+1];
     char            *label;
@@ -81,6 +82,8 @@ typedef struct spss_varinfo_s {
 
 int spss_format(char *buffer, size_t len, spss_format_t *format);
 int spss_varinfo_compare(const void *elem1, const void *elem2);
+
+void spss_varinfo_free(spss_varinfo_t *info);
 
 readstat_missingness_t spss_missingness_for_info(spss_varinfo_t *info);
 readstat_variable_t *spss_init_variable_for_info(spss_varinfo_t *info, int index_after_skipping);
