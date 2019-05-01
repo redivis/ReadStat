@@ -18,7 +18,6 @@ LT_INIT([disable-static])
 AC_PROG_CC
 AC_PROG_CXX
 
-AC_ARG_ENABLE([static-iconv], AS_HELP_STRING([--enable-static-iconv], [Link iconv statically]), [static_iconv=yes], [static_iconv=no])
 AC_ARG_ENABLE([code-coverage], AS_HELP_STRING([--enable-code-coverage], [Enable code coverage profiling]), [code_coverage=yes], [code_coverage=no])
 AC_ARG_ENABLE([fuzz-testing], AS_HELP_STRING([--enable-fuzz-testing], ["Enable fuzz testing (requires Clang 6 or later)"]), [
    AC_MSG_CHECKING([whether $CC accepts -fsanitize=fuzzer])
@@ -37,13 +36,11 @@ AC_ARG_ENABLE([fuzz-testing], AS_HELP_STRING([--enable-fuzz-testing], ["Enable f
 AM_CONDITIONAL([FUZZER_ENABLED], test "x$fuzzer" = "xyes")
 AC_SUBST([SANITIZERS])
 
+AM_ICONV
+
 AC_CANONICAL_HOST
 AS_CASE([$host],
-	[*darwin*], [EXTRA_LIBS="-liconv"],
-	[*linux*|*bsd*], [EXTRA_LIBS="-lm"],
-	[*mingw*|*cygwin*], [AS_IF([test "x$static_iconv" = "xyes"],
-                               [EXTRA_LIBS="-lm"],
-                               [EXTRA_LIBS="-liconv -lm"])],
+	[*linux*|*bsd*|*mingw*|*cygwin*], [EXTRA_LIBS="-lm"],
 	[EXTRA_LIBS=""])
 AC_SUBST([EXTRA_LIBS])
 
@@ -54,10 +51,8 @@ AS_CASE([$host],
 AC_SUBST([EXTRA_WARNINGS])
 
 AS_CASE([$host],
-	[*mingw*|*cygwin*], [AS_IF([test "x$static_iconv" = "xyes"],
-                               [EXTRA_LDFLAGS="-Wl,-Bstatic,-liconv -no-undefined"],
-                               [EXTRA_LDFLAGS="-no-undefined"])],
-	[EXTRA_LDFLAGS=""])
+	[*mingw*|*cygwin*], [EXTRA_LDFLAGS="$LTLIBICONV -no-undefined"],
+	[EXTRA_LDFLAGS="$LTLIBICONV"])
 AC_SUBST([EXTRA_LDFLAGS])
 
 AC_ARG_VAR([LIB_FUZZING_ENGINE], [Location of prebuilt fuzzing engine library])
