@@ -109,6 +109,17 @@ static readstat_error_t dta_emit_header_time_stamp(readstat_writer_t *writer, dt
     char months[][4] = { 
         "Jan", "Feb", "Mar", "Apr", "May", "Jun",
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+    if (!time_s) {
+        error = READSTAT_ERROR_BAD_TIMESTAMP_VALUE;
+        goto cleanup;
+    }
+
+    if (!timestamp) {
+        error = READSTAT_ERROR_MALLOC;
+        goto cleanup;
+    }
+
     uint8_t actual_timestamp_len = snprintf(timestamp, ctx->timestamp_len, "%02d %3s %04d %02d:%02d",
             time_s->tm_mday, months[time_s->tm_mon], time_s->tm_year + 1900,
             time_s->tm_hour, time_s->tm_min);
@@ -307,11 +318,14 @@ static readstat_error_t dta_validate_name_unreserved(const char *name) {
 static readstat_error_t dta_validate_name(const char *name, int unicode, size_t max_len) {
     readstat_error_t error = READSTAT_OK;
 
-    if ((error = dta_validate_name_chars(name, unicode)) != READSTAT_OK)
-        return error;
-
     if (strlen(name) > max_len)
         return READSTAT_ERROR_NAME_IS_TOO_LONG;
+
+    if (strlen(name) == 0)
+        return READSTAT_ERROR_NAME_IS_ZERO_LENGTH;
+
+    if ((error = dta_validate_name_chars(name, unicode)) != READSTAT_OK)
+        return error;
 
     return dta_validate_name_unreserved(name);
 }

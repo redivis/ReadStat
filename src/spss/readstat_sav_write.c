@@ -112,11 +112,23 @@ static int sav_variable_segments(readstat_type_t type, size_t user_width) {
 }
 
 static readstat_error_t sav_emit_header(readstat_writer_t *writer) {
+    sav_file_header_record_t header = { { 0 } };
     readstat_error_t retval = READSTAT_OK;
     time_t now = writer->timestamp;
     struct tm *time_s = localtime(&now);
 
-    sav_file_header_record_t header = { { 0 } };
+    /* There are portability issues with strftime so hack something up */
+    char months[][4] = { 
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+
+    char creation_date[sizeof(header.creation_date)+1] = { 0 };
+    char creation_time[sizeof(header.creation_time)+1] = { 0 };
+
+    if (!time_s) {
+        retval = READSTAT_ERROR_BAD_TIMESTAMP_VALUE;
+        goto cleanup;
+    }
 
     memcpy(header.rec_type, "$FL2", sizeof("$FL2")-1);
     if (writer->compression == READSTAT_COMPRESS_BINARY) {
@@ -142,26 +154,19 @@ static readstat_error_t sav_emit_header(readstat_writer_t *writer) {
     header.ncases = writer->row_count;
     header.bias = 100.0;
     
-    /* There are portability issues with strftime so hack something up */
-    char months[][4] = { 
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
-
-    char creation_date[sizeof(header.creation_date)+1];
     snprintf(creation_date, sizeof(creation_date),
             "%02d %3.3s %02d", 
             (unsigned int)time_s->tm_mday % 100,
             months[time_s->tm_mon],
             (unsigned int)time_s->tm_year % 100);
-    strncpy(header.creation_date, creation_date, sizeof(header.creation_date));
+    memcpy(header.creation_date, creation_date, sizeof(header.creation_date));
 
-    char creation_time[sizeof(header.creation_time)+1];
     snprintf(creation_time, sizeof(creation_time),
             "%02d:%02d:%02d",
             (unsigned int)time_s->tm_hour % 100,
             (unsigned int)time_s->tm_min % 100,
             (unsigned int)time_s->tm_sec % 100);
-    strncpy(header.creation_time, creation_time, sizeof(header.creation_time));
+    memcpy(header.creation_time, creation_time, sizeof(header.creation_time));
     
     memset(header.file_label, ' ', sizeof(header.file_label));
 
@@ -173,6 +178,8 @@ static readstat_error_t sav_emit_header(readstat_writer_t *writer) {
         memcpy(header.file_label, writer->file_label, file_label_len);
     
     retval = readstat_write_bytes(writer, &header, sizeof(header));
+
+cleanup:
     return retval;
 }
 
@@ -1223,6 +1230,66 @@ static size_t sav_variable_width(readstat_type_t type, size_t user_width) {
     return 8;
 }
 
+static readstat_error_t sav_validate_name_chars(const char *name, int unicode) {
+    /* TODO check Unicode class */
+    int j;
+    for (j=0; name[j]; j++) {
+        if (name[j] == ' ')
+            return READSTAT_ERROR_NAME_CONTAINS_ILLEGAL_CHARACTER;
+
+        if ((name[j] > 0 || !unicode) && name[j] != '@' &&
+                name[j] != '.' && name[j] != '_' &&
+                name[j] != '$' && name[j] != '#' &&
+                !(name[j] >= 'a' && name[j] <= 'z') &&
+                !(name[j] >= 'A' && name[j] <= 'Z') &&
+                !(name[j] >= '0' && name[j] <= '9')) {
+            return READSTAT_ERROR_NAME_CONTAINS_ILLEGAL_CHARACTER;
+        }
+    }
+    char first_char = name[0];
+    if ((first_char > 0 || !unicode) && first_char != '@' &&
+            !(first_char >= 'a' && first_char <= 'z') &&
+            !(first_char >= 'A' && first_char <= 'Z')) {
+        return READSTAT_ERROR_NAME_BEGINS_WITH_ILLEGAL_CHARACTER;
+    }
+    return READSTAT_OK;
+}
+
+static readstat_error_t sav_validate_name_unreserved(const char *name) {
+    if (strcmp(name, "ALL") == 0 || strcmp(name, "AND") == 0 ||
+            strcmp(name, "BY") == 0 || strcmp(name, "EQ") == 0 ||
+            strcmp(name, "GE") == 0 || strcmp(name, "GT") == 0 ||
+            strcmp(name, "GT") == 0 || strcmp(name, "LE") == 0 ||
+            strcmp(name, "LT") == 0 || strcmp(name, "NE") == 0 ||
+            strcmp(name, "NOT") == 0 || strcmp(name, "OR") == 0 ||
+            strcmp(name, "TO") == 0 || strcmp(name, "WITH") == 0)
+        return READSTAT_ERROR_NAME_IS_RESERVED_WORD;
+
+    return READSTAT_OK;
+}
+
+static readstat_error_t sav_validate_name_length(size_t name_len) {
+    if (name_len > 64)
+        return READSTAT_ERROR_NAME_IS_TOO_LONG;
+    if (name_len == 0)
+        return READSTAT_ERROR_NAME_IS_ZERO_LENGTH;
+    return READSTAT_OK;
+}
+
+static readstat_error_t sav_variable_ok(const readstat_variable_t *variable) {
+    readstat_error_t error = READSTAT_OK;
+
+    error = sav_validate_name_length(strlen(variable->name));
+    if (error != READSTAT_OK)
+        return error;
+
+    error = sav_validate_name_unreserved(variable->name);
+    if (error != READSTAT_OK)
+        return error;
+
+    return sav_validate_name_chars(variable->name, 1);
+}
+
 static sav_varnames_t *sav_varnames_init(readstat_writer_t *writer) {
     sav_varnames_t *varnames = calloc(writer->variables_count, sizeof(sav_varnames_t));
 
@@ -1230,24 +1297,22 @@ static sav_varnames_t *sav_varnames_init(readstat_writer_t *writer) {
     int i, k;
     for (i=0; i<writer->variables_count; i++) {
         readstat_variable_t *r_variable = readstat_get_variable(writer, i);
-        const char *name = readstat_variable_get_name(r_variable);
+        const char *name = r_variable->name;
         char *shortname = varnames[i].shortname;
         char *stem = varnames[i].stem;
-        strncpy(shortname, name, 8);
-        for (k=0; k<8; k++) { // upcase
-            if (!shortname[k])
-                break;
+        snprintf(shortname, sizeof(varnames[0].shortname), "%.8s", name);
+        for (k=0; shortname[k]; k++) { // upcase
             shortname[k] = toupper(shortname[k]);
         }
         if (ck_str_hash_lookup(shortname, table)) {
-            snprintf(shortname, 8, "V%d_A", i+1);
+            snprintf(shortname, sizeof(varnames[0].shortname), "V%d_A", i+1);
         }
         ck_str_hash_insert(shortname, r_variable, table);
 
         if (r_variable->user_width <= MAX_STRING_SIZE)
             continue;
 
-        strncpy(stem, shortname, 5); // conflict resolution?
+        snprintf(stem, sizeof(varnames[0].stem), "%.5s", shortname); // conflict resolution?
     }
     ck_hash_table_free(table);
     return varnames;
@@ -1351,6 +1416,7 @@ readstat_error_t readstat_begin_writing_sav(readstat_writer_t *writer, void *use
 
     writer->callbacks.metadata_ok = &sav_metadata_ok;
     writer->callbacks.variable_width = &sav_variable_width;
+    writer->callbacks.variable_ok = &sav_variable_ok;
     writer->callbacks.write_int8 = &sav_write_int8;
     writer->callbacks.write_int16 = &sav_write_int16;
     writer->callbacks.write_int32 = &sav_write_int32;

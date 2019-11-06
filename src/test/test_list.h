@@ -636,7 +636,7 @@ static rt_test_group_t _test_groups[] = {
             {
                 .label = "Column name begins with number",
                 .write_error = READSTAT_ERROR_NAME_BEGINS_WITH_ILLEGAL_CHARACTER,
-                .test_formats = RT_FORMAT_DTA | RT_FORMAT_SAS,
+                .test_formats = RT_FORMAT_DTA | RT_FORMAT_SAS | RT_FORMAT_SAV,
                 .rows = 0,
                 .columns = {
                     {
@@ -755,6 +755,28 @@ static rt_test_group_t _test_groups[] = {
                 .columns = {
                     {
                         .name = "var1",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "SAV column name is a reserved word",
+                .write_error = READSTAT_ERROR_NAME_IS_RESERVED_WORD,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "ALL",
+                        .type = READSTAT_TYPE_DOUBLE
+                    }
+                }
+            },
+            {
+                .label = "SAV column name contains punctuation",
+                .write_error = READSTAT_ERROR_NAME_CONTAINS_ILLEGAL_CHARACTER,
+                .test_formats = RT_FORMAT_SAV,
+                .columns = {
+                    {
+                        .name = "VAR!",
                         .type = READSTAT_TYPE_DOUBLE
                     }
                 }
@@ -1739,9 +1761,9 @@ static rt_test_group_t _test_groups[] = {
         .label = "Timestamps",
         .tests = {
             {
-                .label = "January 1, 1970",
+                .label = "January 2, 1970", /* Windows localtime can't handle negative UNIX timestamps */
                 .test_formats = RT_FORMAT_TEST_TIMESTAMPS,
-                .timestamp = { .tm_year = /* 19 */70, .tm_mon = 0, .tm_mday = 1, .tm_hour = 0, .tm_min = 0 },
+                .timestamp = { .tm_year = /* 19 */70, .tm_mon = 0, .tm_mday = 2, .tm_hour = 0, .tm_min = 0 },
                 .columns = { { .name = "VAR1", .type = READSTAT_TYPE_DOUBLE } }
             },
 
