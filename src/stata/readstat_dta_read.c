@@ -1,4 +1,6 @@
 
+#define _XOPEN_SOURCE 700 /* for strnlen */
+
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
@@ -44,18 +46,21 @@ static readstat_variable_t *dta_init_variable(dta_ctx_t *ctx, int i, int index_a
 
     readstat_convert(variable->name, sizeof(variable->name), 
             &ctx->varlist[ctx->variable_name_len*i],
-            ctx->variable_name_len, ctx->converter);
+            strnlen(&ctx->varlist[ctx->variable_name_len*i], ctx->variable_name_len),
+            ctx->converter);
 
     if (ctx->variable_labels[ctx->variable_labels_entry_len*i]) {
         readstat_convert(variable->label, sizeof(variable->label),
                 &ctx->variable_labels[ctx->variable_labels_entry_len*i],
-                ctx->variable_labels_entry_len, ctx->converter);
+                strnlen(&ctx->variable_labels[ctx->variable_labels_entry_len*i], ctx->variable_labels_entry_len),
+                ctx->converter);
     }
 
     if (ctx->fmtlist[ctx->fmtlist_entry_len*i]) {
         readstat_convert(variable->format, sizeof(variable->format),
                 &ctx->fmtlist[ctx->fmtlist_entry_len*i],
-                ctx->fmtlist_entry_len, ctx->converter);
+                strnlen(&ctx->fmtlist[ctx->fmtlist_entry_len*i], ctx->fmtlist_entry_len),
+                ctx->converter);
         if (variable->format[0] == '%') {
             if (variable->format[1] == '-') {
                 variable->alignment = READSTAT_ALIGNMENT_LEFT;
@@ -312,10 +317,10 @@ cleanup:
 static int dta_compare_strls(const void *elem1, const void *elem2) {
     const dta_strl_t *key = (const dta_strl_t *)elem1;
     const dta_strl_t *target = *(const dta_strl_t **)elem2;
-    if (key->v == target->v)
-        return key->o - target->o;
+    if (key->o == target->o)
+        return key->v - target->v;
 
-    return key->v - target->v;
+    return key->o - target->o;
 }
 
 static dta_strl_t dta_interpret_strl_vo_bytes(dta_ctx_t *ctx, const unsigned char *vo_bytes) {
@@ -355,7 +360,7 @@ static readstat_error_t dta_117_read_strl(dta_ctx_t *ctx, dta_strl_t *strl) {
     readstat_io_t *io = ctx->io;
     dta_117_strl_header_t header;
 
-    if (io->read(&header, sizeof(header), io->io_ctx) != sizeof(dta_117_strl_header_t)) {
+    if (io->read(&header, SIZEOF_DTA_117_STRL_HEADER_T, io->io_ctx) != SIZEOF_DTA_117_STRL_HEADER_T) {
         retval = READSTAT_ERROR_READ;
         goto cleanup;
     }
@@ -374,7 +379,7 @@ static readstat_error_t dta_118_read_strl(dta_ctx_t *ctx, dta_strl_t *strl) {
     readstat_io_t *io = ctx->io;
     dta_118_strl_header_t header;
 
-    if (io->read(&header, sizeof(header), io->io_ctx) != sizeof(dta_118_strl_header_t)) {
+    if (io->read(&header, SIZEOF_DTA_118_STRL_HEADER_T, io->io_ctx) != SIZEOF_DTA_118_STRL_HEADER_T) {
         retval = READSTAT_ERROR_READ;
         goto cleanup;
     }
@@ -607,10 +612,11 @@ static readstat_error_t dta_handle_row(const unsigned char *buf, dta_ctx_t *ctx)
         }
 
         if (value.type == READSTAT_TYPE_STRING) {
-            size_t str_len = 0;
-            while (str_len < max_len && buf[offset + str_len] != '\0') {
-                str_len++;
+            if (max_len == 0) {
+                retval = READSTAT_ERROR_PARSE;
+                goto cleanup;
             }
+            size_t str_len = strnlen((const char *)&buf[offset], max_len);
             retval = readstat_convert(str_buf, sizeof(str_buf),
                     (const char *)&buf[offset], str_len, ctx->converter);
             if (retval != READSTAT_OK)
@@ -904,12 +910,10 @@ static readstat_error_t dta_read_label_and_timestamp(dta_ctx_t *ctx) {
                 memmove(timestamp_buffer+1, timestamp_buffer, timestamp_len-1);
                 timestamp_buffer[0] = last_data_label_char;
             }
-            if ((retval = dta_parse_timestamp(timestamp_buffer, timestamp_len,
-                            &timestamp, ctx->handle.error, ctx->user_ctx)) != READSTAT_OK) {
-                goto cleanup;
+            if (dta_parse_timestamp(timestamp_buffer, timestamp_len,
+                        &timestamp, ctx->handle.error, ctx->user_ctx) == READSTAT_OK) {
+                ctx->timestamp = mktime(&timestamp);
             }
-
-            ctx->timestamp = mktime(&timestamp);
         }
     }
 
@@ -1046,7 +1050,8 @@ static readstat_error_t dta_handle_value_labels(dta_ctx_t *ctx) {
                 readstat_value_t value = { .v = { .i32_value = i }, .type = READSTAT_TYPE_INT32 };
                 char label_buf[4*8+1];
 
-                retval = readstat_convert(label_buf, sizeof(label_buf), &table_buffer[8*i], 8, ctx->converter);
+                retval = readstat_convert(label_buf, sizeof(label_buf),
+                        &table_buffer[8*i], strnlen(&table_buffer[8*i], 8), ctx->converter);
                 if (retval != READSTAT_OK)
                     goto cleanup;
 
@@ -1055,7 +1060,7 @@ static readstat_error_t dta_handle_value_labels(dta_ctx_t *ctx) {
                     goto cleanup;
                 }
             }
-        } else if (len > 8) {
+        } else if (len >= 8) {
             if ((retval = dta_read_tag(ctx, "</lbl>")) != READSTAT_OK) {
                 goto cleanup;
             }
@@ -1102,8 +1107,9 @@ static readstat_error_t dta_handle_value_labels(dta_ctx_t *ctx) {
                 size_t max_label_len = txtlen - off[i];
                 if (max_label_len > MAX_VALUE_LABEL_LEN)
                     max_label_len = MAX_VALUE_LABEL_LEN;
+                size_t label_len = strnlen(&txt[off[i]], max_label_len);
 
-                retval = readstat_convert(utf8_buffer, utf8_buffer_len, &txt[off[i]], max_label_len, ctx->converter);
+                retval = readstat_convert(utf8_buffer, utf8_buffer_len, &txt[off[i]], label_len, ctx->converter);
                 if (retval != READSTAT_OK)
                     goto cleanup;
 

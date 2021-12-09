@@ -35,6 +35,7 @@ unsigned char sas7bcat_magic_number[32] = {
 
 /* This table is cobbled together from extant files and:
  * https://support.sas.com/documentation/cdl/en/nlsref/61893/HTML/default/viewer.htm#a002607278.htm
+ * https://support.sas.com/documentation/onlinedoc/dfdmstudio/2.6/dmpdmsug/Content/dfU_Encodings_SAS.html
  *
  * Discrepancies form the official documentation are noted with a comment. It
  * appears that in some instances that SAS software uses a newer encoding than
@@ -48,11 +49,33 @@ static readstat_charset_entry_t _charset_table[] = {
     { .code = 29,    .name = "ISO-8859-1" },
     { .code = 30,    .name = "ISO-8859-2" },
     { .code = 31,    .name = "ISO-8859-3" },
+    { .code = 32,    .name = "ISO-8859-4" },
+    { .code = 33,    .name = "ISO-8859-5" },
     { .code = 34,    .name = "ISO-8859-6" },
     { .code = 35,    .name = "ISO-8859-7" },
     { .code = 36,    .name = "ISO-8859-8" },
+    { .code = 37,    .name = "ISO-8859-9" },
     { .code = 39,    .name = "ISO-8859-11" },
-    { .code = 40,    .name = "ISO-8859-9" },
+    { .code = 40,    .name = "ISO-8859-15" },
+    { .code = 41,    .name = "CP437" },
+    { .code = 42,    .name = "CP850" },
+    { .code = 43,    .name = "CP852" },
+    { .code = 44,    .name = "CP857" },
+    { .code = 45,    .name = "CP858" },
+    { .code = 46,    .name = "CP862" },
+    { .code = 47,    .name = "CP864" },
+    { .code = 48,    .name = "CP865" },
+    { .code = 49,    .name = "CP866" },
+    { .code = 50,    .name = "CP869" },
+    { .code = 51,    .name = "CP874" },
+    { .code = 52,    .name = "CP921" },
+    { .code = 53,    .name = "CP922" },
+    { .code = 54,    .name = "CP1129" },
+    { .code = 55,    .name = "CP720" },
+    { .code = 56,    .name = "CP737" },
+    { .code = 57,    .name = "CP775" },
+    { .code = 58,    .name = "CP860" },
+    { .code = 59,    .name = "CP863" },
     { .code = 60,    .name = "WINDOWS-1250" },
     { .code = 61,    .name = "WINDOWS-1251" },
     { .code = 62,    .name = "WINDOWS-1252" },
@@ -62,13 +85,44 @@ static readstat_charset_entry_t _charset_table[] = {
     { .code = 66,    .name = "WINDOWS-1256" },
     { .code = 67,    .name = "WINDOWS-1257" },
     { .code = 68,    .name = "WINDOWS-1258" },
+    { .code = 69,    .name = "MACROMAN" },
+    { .code = 70,    .name = "MACARABIC" },
+    { .code = 71,    .name = "MACHEBREW" },
+    { .code = 72,    .name = "MACGREEK" },
+    { .code = 73,    .name = "MACTHAI" },
+    { .code = 75,    .name = "MACTURKISH" },
+    { .code = 76,    .name = "MACUKRAINE" },
+    { .code = 118,   .name = "CP950" },
     { .code = 119,   .name = "EUC-TW" },
     { .code = 123,   .name = "BIG-5" },
     { .code = 125,   .name = "GB18030" }, // "euc-cn" in SAS
+    { .code = 126,   .name = "WINDOWS-936" }, // "zwin"
+    { .code = 128,   .name = "CP1381" }, // "zpce"
     { .code = 134,   .name = "EUC-JP" },
+    { .code = 136,   .name = "CP949" },
+    { .code = 137,   .name = "CP942" },
     { .code = 138,   .name = "CP932" }, // "shift-jis" in SAS
-    { .code = 140,   .name = "EUC-KR" }
+    { .code = 140,   .name = "EUC-KR" },
+    { .code = 141,   .name = "CP949" }, // "kpce"
+    { .code = 142,   .name = "CP949" }, // "kwin"
+    { .code = 163,   .name = "MACICELAND" },
+    { .code = 167,   .name = "ISO-2022-JP" },
+    { .code = 168,   .name = "ISO-2022-KR" },
+    { .code = 169,   .name = "ISO-2022-CN" },
+    { .code = 172,   .name = "ISO-2022-CN-EXT" },
+    { .code = 204,   .name = SAS_DEFAULT_STRING_ENCODING }, // "any" in SAS
+    { .code = 205,   .name = "GB18030" },
+    { .code = 227,   .name = "ISO-8859-14" },
+    { .code = 242,   .name = "ISO-8859-13" },
+    { .code = 245,   .name = "MACCROATIAN" },
+    { .code = 246,   .name = "MACCYRILLIC" },
+    { .code = 247,   .name = "MACROMANIA" },
+    { .code = 248,   .name = "SHIFT_JISX0213" },
 };
+
+static time_t sas_epoch() {
+    return - 3653 * 86400; // seconds between 01-01-1960 and 01-01-1970
+}
 
 static time_t sas_convert_time(double time, time_t epoch) {
     time += epoch;
@@ -109,8 +163,7 @@ readstat_error_t sas_read_header(readstat_io_t *io, sas_header_info_t *hinfo,
     sas_header_end_t    header_end;
     int retval = READSTAT_OK;
     char error_buf[1024];
-    struct tm epoch_tm = { .tm_year = 60, .tm_mday = 1 };
-    time_t epoch = mktime(&epoch_tm);
+    time_t epoch = sas_epoch();
 
     if (io->read(&header_start, sizeof(sas_header_start_t), io->io_ctx) < sizeof(sas_header_start_t)) {
         retval = READSTAT_ERROR_READ;
@@ -153,7 +206,7 @@ readstat_error_t sas_read_header(readstat_io_t *io, sas_header_info_t *hinfo,
         retval = READSTAT_ERROR_UNSUPPORTED_CHARSET;
         goto cleanup;
     }
-    memcpy(hinfo->file_label, header_start.file_label, sizeof(header_start.file_label));
+    memcpy(hinfo->table_name, header_start.table_name, sizeof(header_start.table_name));
     if (io->seek(hinfo->pad1, READSTAT_SEEK_CUR, io->io_ctx) == -1) {
         retval = READSTAT_ERROR_SEEK;
         goto cleanup;
@@ -201,7 +254,7 @@ readstat_error_t sas_read_header(readstat_io_t *io, sas_header_info_t *hinfo,
         retval = READSTAT_ERROR_PARSE;
         goto cleanup;
     }
-    if (hinfo->header_size > (1<<20) || hinfo->page_size > (1<<24)) {
+    if (hinfo->header_size > (1<<24) || hinfo->page_size > (1<<24)) {
         retval = READSTAT_ERROR_PARSE;
         goto cleanup;
     }
@@ -246,13 +299,27 @@ readstat_error_t sas_read_header(readstat_io_t *io, sas_header_info_t *hinfo,
         retval = READSTAT_ERROR_READ;
         goto cleanup;
     }
-    int major, minor, revision;
-    if (sscanf(header_end.release, "%1d.%04dM%1d", &major, &minor, &revision) == 3) {
-        hinfo->major_version = major;
-        hinfo->minor_version = minor;
-        hinfo->revision = revision;
+    char major;
+    int minor, revision;
+    if (sscanf(header_end.release, "%c.%04dM%1d", &major, &minor, &revision) != 3) {
+        retval = READSTAT_ERROR_PARSE;
+        goto cleanup;
     }
-    if (major == 9 && minor == 0 && revision == 0) {
+
+    if (major >= '1' && major <= '9') {
+        hinfo->major_version = major - '0';
+    } else if (major == 'V') {
+        // It appears that SAS Visual Forecaster reports the major version as "V"
+        // Treat it as version 9 for all intents and purposes
+        hinfo->major_version = 9;
+    } else {
+        retval = READSTAT_ERROR_PARSE;
+        goto cleanup;
+    }
+    hinfo->minor_version = minor;
+    hinfo->revision = revision;
+
+    if ((major == '8' || major == '9') && minor == 0 && revision == 0) {
         /* A bit of a hack, but most SAS installations are running a minor update */
         hinfo->vendor = READSTAT_VENDOR_STAT_TRANSFER;
     } else {
@@ -274,19 +341,18 @@ cleanup:
 
 readstat_error_t sas_write_header(readstat_writer_t *writer, sas_header_info_t *hinfo, sas_header_start_t header_start) {
     readstat_error_t retval = READSTAT_OK;
-    struct tm epoch_tm = { .tm_year = 60, .tm_mday = 1 };
-    time_t epoch = mktime(&epoch_tm);
+    time_t epoch = sas_epoch();
 
-    memset(header_start.file_label, ' ', sizeof(header_start.file_label));
+    memset(header_start.table_name, ' ', sizeof(header_start.table_name));
 
-    size_t file_label_len = strlen(writer->file_label);
-    if (file_label_len > sizeof(header_start.file_label))
-        file_label_len = sizeof(header_start.file_label);
+    size_t table_name_len = strlen(writer->table_name);
+    if (table_name_len > sizeof(header_start.table_name))
+        table_name_len = sizeof(header_start.table_name);
 
-    if (file_label_len) {
-        memcpy(header_start.file_label, writer->file_label, file_label_len);
+    if (table_name_len) {
+        memcpy(header_start.table_name, writer->table_name, table_name_len);
     } else {
-        memcpy(header_start.file_label, "DATASET", sizeof("DATASET")-1);
+        memcpy(header_start.table_name, "DATASET", sizeof("DATASET")-1);
     }
 
     retval = readstat_write_bytes(writer, &header_start, sizeof(sas_header_start_t));
@@ -339,7 +405,7 @@ readstat_error_t sas_write_header(readstat_writer_t *writer, sas_header_info_t *
         goto cleanup;
 
     sas_header_end_t header_end = {
-        .host = "W32_VSPRO"
+        .host = "9.0401M6Linux"
     };
 
     char release[sizeof(header_end.release)+1] = { 0 };

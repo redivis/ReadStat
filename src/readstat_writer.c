@@ -19,10 +19,10 @@ static int readstat_compare_string_refs(const void *elem1, const void *elem2) {
     readstat_string_ref_t *ref1 = *(readstat_string_ref_t **)elem1;
     readstat_string_ref_t *ref2 = *(readstat_string_ref_t **)elem2;
 
-    if (ref1->first_v == ref2->first_v)
-        return ref1->first_o - ref2->first_o;
+    if (ref1->first_o == ref2->first_o)
+        return ref1->first_v - ref2->first_v;
 
-    return ref1->first_v - ref2->first_v;
+    return ref1->first_o - ref2->first_o;
 }
 
 readstat_string_ref_t *readstat_string_ref_init(const char *string) {
@@ -258,9 +258,13 @@ static readstat_error_t readstat_write_repeated_byte(readstat_writer_t *writer, 
     if (len == 0)
         return READSTAT_OK;
 
-    char zeros[len];
+    char *zeros = malloc(len);
+
     memset(zeros, byte, len);
-    return readstat_write_bytes(writer, zeros, len);
+    readstat_error_t error = readstat_write_bytes(writer, zeros, len);
+
+    free(zeros);
+    return error;
 }
 
 readstat_error_t readstat_write_zeros(readstat_writer_t *writer, size_t len) {

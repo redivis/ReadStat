@@ -1,7 +1,5 @@
-
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -9,6 +7,10 @@
 #include "../readstat_iconv.h"
 #include "../readstat_convert.h"
 #include "readstat_schema.h"
+
+#if defined _MSC_VER
+#define restrict __restrict
+#endif
 
 typedef struct txt_ctx_s {
     int                rows;
@@ -19,26 +21,31 @@ typedef struct txt_ctx_s {
 static readstat_error_t handle_value(readstat_parser_t *parser, iconv_t converter,
         int obs_index, readstat_schema_entry_t *entry, char *bytes, size_t len, void *ctx) {
     readstat_error_t error = READSTAT_OK;
-    char converted_value[4*len+1];
+    char *converted_value = malloc(4*len+1);
     readstat_variable_t *variable = &entry->variable;
     readstat_value_t value = { .type = variable->type };
     if (readstat_type_class(variable->type) == READSTAT_TYPE_CLASS_STRING) {
-        error = readstat_convert(converted_value, sizeof(converted_value), bytes, len, converter);
+        error = readstat_convert(converted_value, 4 * len + 1, bytes, len, converter);
         if (error != READSTAT_OK)
             goto cleanup;
         value.v.string_value = converted_value;
-    } else if (variable->type == READSTAT_TYPE_DOUBLE) { 
-        value.v.double_value = strtod(bytes, NULL);
-    } else if (variable->type == READSTAT_TYPE_FLOAT) {
-        value.v.float_value = strtof(bytes, NULL);
     } else {
-        value.v.i32_value = strtol(bytes, NULL, 10);
-        value.type = READSTAT_TYPE_INT32;
+        char *endptr = NULL;
+        if (variable->type == READSTAT_TYPE_DOUBLE) {
+            value.v.double_value = strtod(bytes, &endptr);
+        } else if (variable->type == READSTAT_TYPE_FLOAT) {
+            value.v.float_value = strtof(bytes, &endptr);
+        } else {
+            value.v.i32_value = strtol(bytes, &endptr, 10);
+            value.type = READSTAT_TYPE_INT32;
+        }
+        value.is_system_missing = (endptr == bytes);
     }
     if (parser->handlers.value(obs_index, variable, value, ctx) == READSTAT_HANDLER_ABORT) {
         error = READSTAT_ERROR_USER_ABORT;
     }
 cleanup:
+    free(converted_value);
     return error;
 }
 
@@ -72,11 +79,13 @@ static readstat_error_t txt_parse_delimited(readstat_parser_t *parser,
     int k=0;
     
     while (1) {
-        int done = 0;
         for (int j=0; j<schema->entry_count; j++) {
             readstat_schema_entry_t *entry = &schema->entries[j];
             int delimiter = (j == schema->entry_count-1) ? '\n' : schema->field_delimiter;
             ssize_t chars_read = txt_getdelim(&value_buffer, &value_buffer_len, delimiter, io);
+            if (chars_read == 0)
+                goto cleanup;
+
             if (chars_read == -1) {
                 retval = READSTAT_ERROR_READ;
                 goto cleanup;
@@ -93,13 +102,13 @@ static readstat_error_t txt_parse_delimited(readstat_parser_t *parser,
                     goto cleanup;
             }
         }
-        k++;
-        if (done)
+        if (++k == parser->row_limit)
             break;
     }
-    ctx->rows = k;
 
 cleanup:
+    ctx->rows = k;
+
     if (value_buffer)
         free(value_buffer);
     
@@ -144,7 +153,8 @@ static readstat_error_t txt_parse_fixed_width(readstat_parser_t *parser,
             }
         }
         
-        k++;
+        if (++k == parser->row_limit)
+            break;
     }
 
 cleanup:

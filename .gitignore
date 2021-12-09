@@ -42,7 +42,14 @@ gen.json
 extract_metadata
 test_sav_date
 test_double_decimals
+generate_corpus
 *.csv
 *.json
 *.py
 generate_corpus
+*.tar.gz
+*.zip
+.DS_Store
+**/*.vcxproj.user
+Debug/
+Release/

@@ -7,6 +7,7 @@
 #include <math.h>
 #include <float.h>
 #include <time.h>
+#include <limits.h>
 
 #include "../readstat.h"
 #include "../readstat_bits.h"
@@ -24,6 +25,7 @@
 #endif
 
 #define DATA_BUFFER_SIZE    65536
+#define VERY_LONG_STRING_MAX_LENGTH INT_MAX
 
 /* Others defined in table below */
 
@@ -349,12 +351,12 @@ static readstat_error_t sav_read_variable_record(sav_ctx_t *ctx) {
     info->labels_index = -1;
 
     retval = readstat_convert(info->name, sizeof(info->name),
-            variable.name, sizeof(variable.name), ctx->converter);
+            variable.name, sizeof(variable.name), NULL);
     if (retval != READSTAT_OK)
         goto cleanup;
 
     retval = readstat_convert(info->longname, sizeof(info->longname), 
-            variable.name, sizeof(variable.name), ctx->converter);
+            variable.name, sizeof(variable.name), NULL);
     if (retval != READSTAT_OK)
         goto cleanup;
 
@@ -690,6 +692,7 @@ static readstat_error_t sav_process_row(unsigned char *buffer, size_t buffer_len
     size_t raw_str_used = 0;
     int segment_offset = 0;
     int var_index = 0, col = 0;
+    int raw_str_is_utf8 = ctx->input_encoding && !strcmp(ctx->input_encoding, "UTF-8");
 
     while (data_offset < buffer_len && col < ctx->var_index && var_index < ctx->var_index) {
         spss_varinfo_t *col_info = ctx->varinfo[col];
@@ -701,8 +704,16 @@ static readstat_error_t sav_process_row(unsigned char *buffer, size_t buffer_len
         }
         if (var_info->type == READSTAT_TYPE_STRING) {
             if (raw_str_used + 8 <= ctx->raw_string_len) {
-                memcpy(ctx->raw_string + raw_str_used, &buffer[data_offset], 8);
-                raw_str_used += 8;
+                if (raw_str_is_utf8) {
+                    /* Skip null bytes, see https://github.com/tidyverse/haven/issues/560  */
+                    char c;
+                    for (int i=0; i<8; i++)
+                        if ((c = buffer[data_offset+i]))
+                            ctx->raw_string[raw_str_used++] = c;
+                } else {
+                    memcpy(ctx->raw_string + raw_str_used, &buffer[data_offset], 8);
+                    raw_str_used += 8;
+                }
             }
             if (++offset == col_info->width) {
                 if (++segment_offset < var_info->n_segments) {
@@ -790,7 +801,7 @@ static readstat_error_t sav_read_data(sav_ctx_t *ctx) {
     if (retval != READSTAT_OK)
         goto done;
 
-    if (ctx->record_count != -1 && ctx->current_row != ctx->row_limit) {
+    if (ctx->record_count >= 0 && ctx->current_row != ctx->row_limit) {
         retval = READSTAT_ERROR_ROW_COUNT_MISMATCH;
     }
 
@@ -934,7 +945,13 @@ static readstat_error_t sav_parse_machine_integer_info_record(const void *data, 
         }
         ctx->input_encoding = src_charset;
     }
-    if (src_charset && dst_charset && strcmp(src_charset, dst_charset) != 0) {
+    if (src_charset && dst_charset) {
+        // You might be tempted to skip the charset conversion when src_charset
+        // and dst_charset are the same. However, some versions of SPSS insert
+        // illegally truncated strings (e.g. the last character is three bytes
+        // but the field only has room for two bytes). So to prevent the client
+        // from receiving an invalid byte sequence, we ram everything through
+        // our iconv machinery.
         iconv_t converter = iconv_open(dst_charset, src_charset);
         if (converter == (iconv_t)-1) {
             return READSTAT_ERROR_UNSUPPORTED_CHARSET;
@@ -987,13 +1004,14 @@ static readstat_error_t sav_parse_variable_display_parameter_record(sav_ctx_t *c
 
     int i;
     long count = ctx->variable_display_values_count;
-    if (count != 2 * ctx->var_count && count != 3 * ctx->var_count) {
+    if (count != 2 * ctx->var_index && count != 3 * ctx->var_index) {
         return READSTAT_ERROR_PARSE;
     }
-    int has_display_width = ctx->var_count > 0 && (count / ctx->var_count == 3);
+    int has_display_width = ctx->var_index > 0 && (count / ctx->var_index == 3);
     int offset = 0;
     for (i=0; i<ctx->var_index;) {
         spss_varinfo_t *info = ctx->varinfo[i];
+        offset = (2 + has_display_width)*i;
         info->measure = spss_measure_to_readstat_measure(ctx->variable_display_values[offset++]);
         if (has_display_width) {
             info->display_width = ctx->variable_display_values[offset++];
@@ -1028,7 +1046,7 @@ static readstat_error_t sav_read_pascal_string(char *buf, size_t buf_len,
         goto cleanup;
     }
 
-    retval = readstat_convert(buf, buf_len, data_ptr, var_name_len, ctx->converter);
+    retval = readstat_convert(buf, buf_len, data_ptr, var_name_len, NULL);
     if (retval != READSTAT_OK)
         goto cleanup;
 
@@ -1051,7 +1069,7 @@ static readstat_error_t sav_parse_long_string_value_labels_record(const void *da
     uint32_t i = 0;
     const char *data_ptr = data;
     const char *data_end = data_ptr + count;
-    char var_name_buf[256*4+1];
+    char var_name_buf[256+1]; // unconverted
     char label_name_buf[256];
     char *value_buffer = NULL;
     char *label_buffer = NULL;
@@ -1185,7 +1203,7 @@ static readstat_error_t sav_parse_long_string_missing_values_record(const void *
     uint32_t i = 0, j = 0;
     const char *data_ptr = data;
     const char *data_end = data_ptr + count;
-    char var_name_buf[256*4+1];
+    char var_name_buf[256+1];
 
     while (data_ptr < data_end) {
         retval = sav_read_pascal_string(var_name_buf, sizeof(var_name_buf),
@@ -1456,11 +1474,13 @@ cleanup:
     return retval;
 }
 
-static void sav_set_n_segments_and_var_count(sav_ctx_t *ctx) {
+static readstat_error_t sav_set_n_segments_and_var_count(sav_ctx_t *ctx) {
     int i;
     ctx->var_count = 0;
     for (i=0; i<ctx->var_index;) {
         spss_varinfo_t *info = ctx->varinfo[i];
+        if (info->string_length > VERY_LONG_STRING_MAX_LENGTH)
+            return READSTAT_ERROR_PARSE;
         if (info->string_length) {
             info->n_segments = (info->string_length + 251) / 252;
         }
@@ -1468,6 +1488,7 @@ static void sav_set_n_segments_and_var_count(sav_ctx_t *ctx) {
         i += info->n_segments;
     }
     ctx->variables = readstat_calloc(ctx->var_count, sizeof(readstat_variable_t *));
+    return READSTAT_OK;
 }
 
 static readstat_error_t sav_handle_variables(sav_ctx_t *ctx) {
@@ -1481,7 +1502,7 @@ static readstat_error_t sav_handle_variables(sav_ctx_t *ctx) {
     for (i=0; i<ctx->var_index;) {
         char label_name_buf[256];
         spss_varinfo_t *info = ctx->varinfo[i];
-        ctx->variables[info->index] = spss_init_variable_for_info(info, index_after_skipping);
+        ctx->variables[info->index] = spss_init_variable_for_info(info, index_after_skipping, ctx->converter);
 
         snprintf(label_name_buf, sizeof(label_name_buf), SAV_LABEL_NAME_PREFIX "%d", info->labels_index);
 
@@ -1586,7 +1607,7 @@ readstat_error_t readstat_parse_sav(readstat_parser_t *parser, const char *path,
     ctx->file_size = file_size;
     if (parser->row_offset > 0)
         ctx->row_offset = parser->row_offset;
-    if (ctx->record_count != -1) {
+    if (ctx->record_count >= 0) {
         int record_count_after_skipping = ctx->record_count - ctx->row_offset;
         if (record_count_after_skipping < 0) {
             record_count_after_skipping = 0;
@@ -1616,7 +1637,8 @@ readstat_error_t readstat_parse_sav(readstat_parser_t *parser, const char *path,
     if ((retval = sav_parse_records_pass2(ctx)) != READSTAT_OK)
         goto cleanup;
  
-    sav_set_n_segments_and_var_count(ctx);
+    if ((retval = sav_set_n_segments_and_var_count(ctx)) != READSTAT_OK)
+        goto cleanup;
 
     if (ctx->var_count == 0) {
         retval = READSTAT_ERROR_PARSE;
@@ -1625,7 +1647,7 @@ readstat_error_t readstat_parse_sav(readstat_parser_t *parser, const char *path,
 
     if (ctx->handle.metadata) {
         readstat_metadata_t metadata = {
-            .row_count = ctx->record_count == -1 ? -1 : ctx->row_limit,
+            .row_count = ctx->record_count < 0 ? -1 : ctx->row_limit,
             .var_count = ctx->var_count,
             .file_encoding = ctx->input_encoding,
             .file_format_version = ctx->format_version,
@@ -1646,7 +1668,8 @@ readstat_error_t readstat_parse_sav(readstat_parser_t *parser, const char *path,
         }
     }
 
-    sav_parse_variable_display_parameter_record(ctx);
+    if ((retval = sav_parse_variable_display_parameter_record(ctx)) != READSTAT_OK)
+        goto cleanup;
 
     if ((retval = sav_handle_variables(ctx)) != READSTAT_OK)
         goto cleanup;

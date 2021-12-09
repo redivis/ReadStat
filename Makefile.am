@@ -57,7 +57,7 @@ endif
 
 if HAVE_RAGEL
 .rl.c:
-	$(AM_V_GEN)$(RAGEL) $(RAGELFLAGS) -C $< -o $@
+	$(AM_V_GEN)$(RAGEL) $(RAGELFLAGS) $< -o $@
 endif
 
 libreadstat_la_CFLAGS = -g -Wall @EXTRA_WARNINGS@ -Werror -pedantic-errors -std=c99
@@ -89,6 +89,7 @@ noinst_HEADERS = \
        src/readstat_iconv.h \
        src/readstat_io_unistd.h \
        src/readstat_malloc.h \
+       src/readstat_strings.h \
        src/readstat_writer.h \
        src/sas/ieee.h \
        src/sas/readstat_sas.h \
@@ -128,6 +129,7 @@ noinst_HEADERS = \
        src/bin/write/mod_xlsx.h \
        src/bin/write/module.h \
        src/bin/write/module_util.h \
+       src/bin/util/main.h \
        src/bin/util/file_format.h \
        src/bin/util/quote_and_escape.h \
        src/bin/util/readstat_dta_days.h \

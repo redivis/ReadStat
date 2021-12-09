@@ -24,8 +24,9 @@
 #define POR_LINE_LENGTH         80
 #define POR_LABEL_NAME_PREFIX   "labels"
 
-#define MAX_FORMAT_TYPE       120
-#define MAX_FORMAT_WIDTH      100
+#define POR_FORMAT_SHIFT     82
+#define MAX_FORMAT_TYPE     (POR_FORMAT_SHIFT+SPSS_FORMAT_TYPE_YMDHMS)
+#define MAX_FORMAT_WIDTH    20000
 #define MAX_FORMAT_DECIMALS   100
 #define MAX_STRING_LENGTH   20000
 
@@ -214,6 +215,7 @@ static readstat_error_t maybe_read_string(por_ctx_t *ctx, char *data, size_t len
     if (string_length > ctx->string_buffer_len) {
         ctx->string_buffer_len = string_length;
         ctx->string_buffer = realloc(ctx->string_buffer, ctx->string_buffer_len);
+        memset(ctx->string_buffer, 0, ctx->string_buffer_len);
     }
     
     if (read_bytes(ctx, ctx->string_buffer, string_length) == -1) {
@@ -336,7 +338,14 @@ static readstat_error_t read_variable_record(por_ctx_t *ctx) {
         if ((retval = read_integer_in_range(ctx, 0, MAX_FORMAT_TYPE, &value)) != READSTAT_OK) {
             goto cleanup;
         }
-        format->type = value;
+        if (value > POR_FORMAT_SHIFT) {
+            // Some files in the wild have their format types shifted by 82 for date/time values
+            // I have no idea why, but see test files linked from:
+            // https://github.com/WizardMac/ReadStat/issues/158
+            format->type = value - POR_FORMAT_SHIFT;
+        } else {
+            format->type = value;
+        }
 
         if ((retval = read_integer_in_range(ctx, 0, MAX_FORMAT_WIDTH, &value)) != READSTAT_OK) {
             goto cleanup;
@@ -510,8 +519,8 @@ static readstat_error_t read_variable_label_record(por_ctx_t *ctx) {
         goto cleanup;
     }
 
-    varinfo->label = realloc(varinfo->label, strlen(string) + 1);
-    strcpy(varinfo->label, string);
+    varinfo->label = realloc(varinfo->label, 4*strlen(string) + 1);
+    retval = readstat_convert(varinfo->label, 4*strlen(string) + 1, string, strlen(string), ctx->converter);
 
 cleanup:
     return retval;
@@ -696,7 +705,7 @@ readstat_error_t handle_variables(por_ctx_t *ctx) {
         spss_varinfo_t *info = &ctx->varinfo[i];
         info->index = i;
 
-        ctx->variables[i] = spss_init_variable_for_info(info, index_after_skipping);
+        ctx->variables[i] = spss_init_variable_for_info(info, index_after_skipping, ctx->converter);
 
         snprintf(label_name_buf, sizeof(label_name_buf), POR_LABEL_NAME_PREFIX "%d", info->labels_index);
 
@@ -812,8 +821,10 @@ readstat_error_t readstat_parse_por(readstat_parser_t *parser, const char *path,
         retval = READSTAT_ERROR_READ;
         goto cleanup;
     }
-    
-    if (por_utf8_encode(check, sizeof(check), tr_check, sizeof(tr_check), ctx->byte2unicode) == -1) {
+
+    ssize_t encoded_len;
+
+    if ((encoded_len = por_utf8_encode(check, sizeof(check), tr_check, sizeof(tr_check), ctx->byte2unicode)) == -1) {
         if (ctx->handle.error) {
             snprintf(error_buf, sizeof(error_buf), "Error converting check string: %.*s", (int)sizeof(check), check);
             ctx->handle.error(error_buf, ctx->user_ctx);
@@ -822,7 +833,7 @@ readstat_error_t readstat_parse_por(readstat_parser_t *parser, const char *path,
         goto cleanup;
     }
 
-    if (strncmp("SPSSPORT", tr_check, sizeof(tr_check)) != 0) {
+    if (strncmp("SPSSPORT", tr_check, encoded_len) != 0) {
         retval = READSTAT_ERROR_PARSE;
         goto cleanup;
     }

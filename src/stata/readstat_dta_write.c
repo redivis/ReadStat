@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
-#include <unistd.h>
 #include <time.h>
 
 #include "../readstat.h"
@@ -14,11 +13,12 @@
 
 #include "readstat_dta.h"
 
-#define DTA_DEFAULT_FORMAT_BYTE    "8.0g"
-#define DTA_DEFAULT_FORMAT_INT16   "8.0g"
-#define DTA_DEFAULT_FORMAT_INT32  "12.0g"
-#define DTA_DEFAULT_FORMAT_FLOAT   "9.0g"
-#define DTA_DEFAULT_FORMAT_DOUBLE "10.0g"
+#define DTA_DEFAULT_DISPLAY_WIDTH_BYTE   8
+#define DTA_DEFAULT_DISPLAY_WIDTH_INT16  8
+#define DTA_DEFAULT_DISPLAY_WIDTH_INT32  12
+#define DTA_DEFAULT_DISPLAY_WIDTH_FLOAT  9
+#define DTA_DEFAULT_DISPLAY_WIDTH_DOUBLE 10
+#define DTA_DEFAULT_DISPLAY_WIDTH_STRING 9
 
 #define DTA_FILE_VERSION_MIN     104
 #define DTA_FILE_VERSION_MAX     119
@@ -398,22 +398,35 @@ static readstat_error_t dta_emit_fmtlist(readstat_writer_t *writer, dta_ctx_t *c
             strncpy(&ctx->fmtlist[ctx->fmtlist_entry_len*i],
                     r_variable->format, ctx->fmtlist_entry_len);
         } else {
-            char *format_spec = "9s";
-            if (r_variable->type == READSTAT_TYPE_INT8) {
-                format_spec = DTA_DEFAULT_FORMAT_BYTE;
-            } else if (r_variable->type == READSTAT_TYPE_INT16) {
-                format_spec = DTA_DEFAULT_FORMAT_INT16;
-            } else if (r_variable->type == READSTAT_TYPE_INT32) {
-                format_spec = DTA_DEFAULT_FORMAT_INT32;
-            } else if (r_variable->type == READSTAT_TYPE_FLOAT) {
-                format_spec = DTA_DEFAULT_FORMAT_FLOAT;
-            } else if (r_variable->type == READSTAT_TYPE_DOUBLE) {
-                format_spec = DTA_DEFAULT_FORMAT_DOUBLE;
+            char format_letter = 'g';
+            int display_width = r_variable->display_width;
+            if (readstat_type_class(r_variable->type) == READSTAT_TYPE_CLASS_STRING) {
+                format_letter = 's';
+            }
+            if (!display_width) {
+                if (r_variable->type == READSTAT_TYPE_INT8) {
+                    display_width = DTA_DEFAULT_DISPLAY_WIDTH_BYTE;
+                } else if (r_variable->type == READSTAT_TYPE_INT16) {
+                    display_width = DTA_DEFAULT_DISPLAY_WIDTH_INT16;
+                } else if (r_variable->type == READSTAT_TYPE_INT32) {
+                    display_width = DTA_DEFAULT_DISPLAY_WIDTH_INT32;
+                } else if (r_variable->type == READSTAT_TYPE_FLOAT) {
+                    display_width = DTA_DEFAULT_DISPLAY_WIDTH_FLOAT;
+                } else if (r_variable->type == READSTAT_TYPE_DOUBLE) {
+                    display_width = DTA_DEFAULT_DISPLAY_WIDTH_DOUBLE;
+                } else {
+                    display_width = DTA_DEFAULT_DISPLAY_WIDTH_STRING;
+                }
             }
             char format[64];
-            sprintf(format, "%%%s%s", 
-                    r_variable->alignment == READSTAT_ALIGNMENT_LEFT ? "-" : "",
-                    format_spec);
+            if (format_letter == 'g') {
+                sprintf(format, "%%%s%d.0g", r_variable->alignment == READSTAT_ALIGNMENT_LEFT ? "-" : "",
+                        display_width);
+            } else {
+                sprintf(format, "%%%s%ds",
+                        r_variable->alignment == READSTAT_ALIGNMENT_LEFT ? "-" : "",
+                        display_width);
+            }
             strncpy(&ctx->fmtlist[ctx->fmtlist_entry_len*i],
                     format, ctx->fmtlist_entry_len);
         }
@@ -509,13 +522,15 @@ cleanup:
 static readstat_error_t dta_emit_characteristics(readstat_writer_t *writer, dta_ctx_t *ctx) {
     readstat_error_t error = READSTAT_OK;
     int i;
-    char buffer[ctx->ch_metadata_len];
+    char *buffer = NULL;
 
     if (ctx->expansion_len_len == 0)
         return READSTAT_OK;
 
     if ((error = dta_write_tag(writer, ctx, "<characteristics>")) != READSTAT_OK)
-        goto cleanup;
+        return error;
+
+    buffer = malloc(ctx->ch_metadata_len);
 
     for (i=0; i<writer->notes_count; i++) {
         if (ctx->file_is_xmlish) {
@@ -567,6 +582,7 @@ static readstat_error_t dta_emit_characteristics(readstat_writer_t *writer, dta_
         goto cleanup;
 
 cleanup:
+    free(buffer);
     return error;
 }
 
@@ -578,7 +594,7 @@ static readstat_error_t dta_117_emit_strl_header(readstat_writer_t *writer, read
         .len = ref->len
     };
 
-    return readstat_write_bytes(writer, &header, sizeof(dta_117_strl_header_t));
+    return readstat_write_bytes(writer, &header, SIZEOF_DTA_117_STRL_HEADER_T);
 }
 
 static readstat_error_t dta_118_emit_strl_header(readstat_writer_t *writer, readstat_string_ref_t *ref) {
@@ -589,7 +605,7 @@ static readstat_error_t dta_118_emit_strl_header(readstat_writer_t *writer, read
         .len = ref->len
     };
 
-    return readstat_write_bytes(writer, &header, sizeof(dta_118_strl_header_t));
+    return readstat_write_bytes(writer, &header, SIZEOF_DTA_118_STRL_HEADER_T);
 }
 
 static readstat_error_t dta_emit_strls(readstat_writer_t *writer, dta_ctx_t *ctx) {
@@ -1051,9 +1067,9 @@ static size_t dta_measure_strls(readstat_writer_t *writer, dta_ctx_t *ctx) {
     for (i=0; i<writer->string_refs_count; i++) {
         readstat_string_ref_t *ref = writer->string_refs[i];
         if (ctx->strl_o_len > 4) {
-            strls_len += 20 + ref->len;
+            strls_len += sizeof("GSO") - 1 + SIZEOF_DTA_118_STRL_HEADER_T + ref->len;
         } else {
-            strls_len += 16 + ref->len;
+            strls_len += sizeof("GSO") - 1 + SIZEOF_DTA_117_STRL_HEADER_T + ref->len;
         }
     }
 

@@ -1,11 +1,24 @@
-
+#include <limits.h>
 #include <stdlib.h>
 #include "../readstat.h"
-#include "../readstat_iconv.h"
 #include "../readstat_malloc.h"
+#include "../readstat_strings.h"
 
 #include "readstat_sav.h"
 #include "readstat_sav_parse.h"
+
+%%{
+    machine key_defs;
+
+    action copy_key {
+        memcpy(temp_key, str_start, str_len);
+        temp_key[str_len] = '\0';
+    }
+        
+    non_ascii_byte = (0x80 .. 0xFE); # multi-byte sequence might be incomplete
+
+    key = ( ( non_ascii_byte | [A-Z@] ) ( non_ascii_byte | [A-Za-z0-9@#$_\.] ){0,7} ) >{ str_start = fpc; } %{ str_len = fpc - str_start; };
+}%%
 
 typedef struct varlookup {
     char      name[8*4+1];
@@ -15,13 +28,13 @@ typedef struct varlookup {
 static int compare_key_varlookup(const void *elem1, const void *elem2) {
     const char *key = (const char *)elem1;
     const varlookup_t *v = (const varlookup_t *)elem2;
-    return strcmp(key, v->name);
+    return strcasecmp(key, v->name);
 }
 
 static int compare_varlookups(const void *elem1, const void *elem2) {
     const varlookup_t *v1 = (const varlookup_t *)elem1;
     const varlookup_t *v2 = (const varlookup_t *)elem2;
-    return strcmp(v1->name, v2->name);
+    return strcasecmp(v1->name, v2->name);
 }
 
 static int count_vars(sav_ctx_t *ctx) {
@@ -60,6 +73,7 @@ static varlookup_t *build_lookup_table(int var_count, sav_ctx_t *ctx) {
 
 %%{
     machine sav_long_variable_parse;
+    include key_defs;
     write data nofinal noerror;
     alphtype unsigned char;
 }%%
@@ -69,34 +83,17 @@ readstat_error_t sav_parse_long_variable_names_record(void *data, int count, sav
     int var_count = count_vars(ctx);
     readstat_error_t retval = READSTAT_OK;
 
-    char temp_key[4*8+1];
-    char temp_val[4*64+1];
+    char temp_key[8+1];
+    char temp_val[64+1];
     unsigned char *str_start = NULL;
     size_t str_len = 0;
     
     char error_buf[8192];
-    unsigned char *p = NULL;
-    unsigned char *pe = NULL;
-    unsigned char *output_buffer = NULL;
+    unsigned char *p = c_data;
+    unsigned char *pe = c_data + count;
 
     varlookup_t *table = build_lookup_table(var_count, ctx);
 
-    if (ctx->converter) {
-        size_t input_len = count;
-        size_t output_len = input_len * 4;
-        pe = p = output_buffer = readstat_malloc(output_len);
-        size_t status = iconv(ctx->converter, 
-                (readstat_iconv_inbuf_t)&data, &input_len,
-                (char **)&pe, &output_len);
-        if (status == (size_t)-1) {
-            free(table);
-            free(output_buffer);
-            return READSTAT_ERROR_PARSE;
-        }
-    } else {
-        p = c_data;
-        pe = c_data + count;
-    }
     unsigned char *eof = pe;
 
     int cs;
@@ -114,25 +111,12 @@ readstat_error_t sav_parse_long_variable_names_record(void *data, int count, sav
             }
         }
 
-        action copy_key {
-            memcpy(temp_key, str_start, str_len);
-            temp_key[str_len] = '\0';
-        }
-
         action copy_value {
             memcpy(temp_val, str_start, str_len);
             temp_val[str_len] = '\0';
         }
 
-        non_ascii_character = ( # UTF-8 byte sequences
-                0xC0..0xDF 0x80..0xBF | 
-                0xE0..0xEF (0x80..0xBF){2} |
-                0xF0..0xF7 (0x80..0xBF){3}
-                );
-        
-        key = ( ( non_ascii_character | [A-Z@] ) ( non_ascii_character | [A-Z0-9@#$_\.] ){0,7} ) >{ str_start = fpc; } %{ str_len = fpc - str_start; };
-        
-        value = ( non_ascii_character | print ){1,64} >{ str_start = fpc; } %{ str_len = fpc - str_start; };
+        value = ( non_ascii_byte | print ){1,64} >{ str_start = fpc; } %{ str_len = fpc - str_start; };
         
         keyval = ( key %copy_key "=" value %copy_value ) %set_long_name;
         
@@ -151,10 +135,9 @@ readstat_error_t sav_parse_long_variable_names_record(void *data, int count, sav
         retval = READSTAT_ERROR_PARSE;
     }
     
+
     if (table)
         free(table);
-    if (output_buffer)
-        free(output_buffer);
 
     /* suppress warning */
     (void)sav_long_variable_parse_en_main;
@@ -164,6 +147,7 @@ readstat_error_t sav_parse_long_variable_names_record(void *data, int count, sav
 
 %%{
     machine sav_very_long_string_parse;
+    include key_defs;
     write data nofinal noerror;
     alphtype unsigned char;
 }%%
@@ -180,30 +164,11 @@ readstat_error_t sav_parse_very_long_string_record(void *data, int count, sav_ct
 
     size_t error_buf_len = 1024 + count;
     char *error_buf = NULL;
-    unsigned char *p = NULL;
-    unsigned char *pe = NULL;
+    unsigned char *p = c_data;
+    unsigned char *pe = c_data + count;
 
-    unsigned char *output_buffer = NULL;
     varlookup_t *table = NULL;
     int cs;
-
-    if (ctx->converter) {
-        size_t input_len = count;
-        size_t output_len = input_len * 4;
-
-        pe = p = output_buffer = readstat_malloc(output_len);
-
-        size_t status = iconv(ctx->converter, 
-                (readstat_iconv_inbuf_t)&data, &input_len,
-                (char **)&pe, &output_len);
-        if (status == (size_t)-1) {
-            free(output_buffer);
-            return READSTAT_ERROR_PARSE;
-        }
-    } else {
-        p = c_data;
-        pe = c_data + count;
-    }
 
     error_buf = readstat_malloc(error_buf_len);
     table = build_lookup_table(var_count, ctx);
@@ -213,27 +178,21 @@ readstat_error_t sav_parse_very_long_string_record(void *data, int count, sav_ct
             varlookup_t *found = bsearch(temp_key, table, var_count, sizeof(varlookup_t), &compare_key_varlookup);
             if (found) {
                 ctx->varinfo[found->index]->string_length = temp_val;
+                ctx->varinfo[found->index]->write_format.width = temp_val;
+                ctx->varinfo[found->index]->print_format.width = temp_val;
             }
         }
 
-        action copy_key {
-            memcpy(temp_key, str_start, str_len);
-            temp_key[str_len] = '\0';
-        }
-        
         action incr_val {
-            if (fc != '\0') { 
-                temp_val = 10 * temp_val + (fc - '0'); 
+            if (fc != '\0') {
+                unsigned char digit = fc - '0';
+                if (temp_val <= (UINT_MAX - digit) / 10) {
+                    temp_val = 10 * temp_val + digit;
+                } else {
+                    fbreak;
+                }
             }
         }
-        
-        non_ascii_character = ( # UTF-8 byte sequences
-                0xC0..0xDF 0x80..0xBF | 
-                0xE0..0xEF (0x80..0xBF){2} |
-                0xF0..0xF7 (0x80..0xBF){3}
-                );
-
-        key = ( ( non_ascii_character | [A-Z@] ) ( non_ascii_character | [A-Z0-9@#$_\.] ){0,7} ) >{ str_start = fpc; } %{ str_len = fpc - str_start; };
         
         value = [0-9]+ >{ temp_val = 0; } $incr_val;
         
@@ -256,8 +215,6 @@ readstat_error_t sav_parse_very_long_string_record(void *data, int count, sav_ct
     
     if (table)
         free(table);
-    if (output_buffer)
-        free(output_buffer);
     if (error_buf)
         free(error_buf);
 
