@@ -196,6 +196,8 @@ extract_metadata_type_t column_type(struct json_metadata* md, const char* varnam
 		return EXTRACT_METADATA_TYPE_NUMERIC;
 	} else if (match_token(md->js, typ, "STRING")) {
 		return EXTRACT_METADATA_TYPE_STRING;
+	} else if (match_token(md->js, typ, "DATE")) {
+		return METADATA_COLUMN_TYPE_DATE;
 	} else {
 		fprintf(stderr, "%s: %d: Unknown metadata type for variable %s\n", __FILE__, __LINE__, varname);
 		exit(EXIT_FAILURE);
