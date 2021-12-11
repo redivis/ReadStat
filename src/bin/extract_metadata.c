@@ -22,6 +22,14 @@ static const char* extract_metadata_type_str(extract_metadata_type_t t) {
         return "STRING";
      case EXTRACT_METADATA_TYPE_UNKNOWN:
         return "UNKNOWN";
+}
+static const char* readstat_type_str(readstat_type_t type) {
+    if (type == READSTAT_TYPE_STRING) {
+        return "READSTAT_TYPE_STRING";
+    }
+
+    if (type == READSTAT_TYPE_INT8) {
+        return "READSTAT_TYPE_INT8";
     }
     return "UNKNOWN";
 }
