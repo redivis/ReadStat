@@ -127,7 +127,7 @@ void add_missing_values(struct context *ctx, readstat_variable_t *variable) {
 
     if (!only_double) {
         fprintf(stderr, "%s:%d only implemented double support for missing values\n", __FILE__, __LINE__);
-        exit(EXIT_FAILURE);
+        return;
     }
 
     if (is_range || (is_range && discrete)) {
