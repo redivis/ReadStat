@@ -127,10 +127,13 @@ void add_missing_values(struct context *ctx, readstat_variable_t *variable) {
 
     if (!only_double) {
         fprintf(stderr, "%s:%d only implemented double support for missing values\n", __FILE__, __LINE__);
+        /* Just ignore this error, better to mostly succeed */
         return;
     }
 
     if (is_range || (is_range && discrete)) {
+        return;
+        /* This was causing errors; we don't need the range */
         handle_missing_range(ctx, variable);
     } else if (discrete) {
         handle_missing_discrete(ctx, variable);
