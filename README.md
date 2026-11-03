@@ -1,11 +1,11 @@
-[![Travis CI build status](https://travis-ci.org/WizardMac/ReadStat.svg?branch=master)](https://travis-ci.org/WizardMac/ReadStat)
-[![Appveyor build status](https://ci.appveyor.com/api/projects/status/76ctatpy3grlrd9x/branch/master?svg=true)](https://ci.appveyor.com/project/evanmiller/readstat/branch/master)
+[![GitHub CI build status](https://github.com/WizardMac/ReadStat/workflows/build/badge.svg)](https://github.com/WizardMac/ReadStat/actions)
 [![codecov](https://codecov.io/gh/WizardMac/ReadStat/branch/master/graph/badge.svg)](https://codecov.io/gh/WizardMac/ReadStat)
+[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/readstat.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:readstat)
 
 ReadStat: Read (and write) data sets from SAS, Stata, and SPSS
---
+==
 
-Originally developed for [Wizard](http://www.wizardmac.com/), ReadStat is a
+Originally developed for [Wizard](https://www.wizardmac.com/), ReadStat is a
 command-line tool and MIT-licensed C library for reading files from popular
 stats packages. Supported data formats include:
 
@@ -20,14 +20,17 @@ Supported metadata formats include:
 * SPSS: .sps (command file)
 
 There is also write support for all the data formats, but not the metadata
-formats. *The produced SAS7BDAT files still cannot be read by SAS*, but feel
-free to contribute your binary-format expertise here.
+formats. The SAS7BDAT writer follows the file layout that SAS 9.4 itself
+produces (as documented by the sas7bdat specification and the
+[FredHutch/sas7bdat](https://github.com/FredHutch/sas7bdat) writer), but it has
+not been verified against a SAS installation; reports of success or failure
+opening its output in SAS are welcome.
 
 For reading in R data files, please see the related
 [librdata](https://github.com/WizardMac/librdata) project.
 
-Installation
-==
+Installation on Unix / macOS
+--
 
 Grab the latest [release](https://github.com/WizardMac/ReadStat/releases) and
 then proceed as usual:
@@ -42,27 +45,41 @@ and then run `./autogen.sh` to generate the configure file.
 If you're on Mac and see errors about `AM_ICONV` when you run `./autogen.sh`,
 you'll need to install [gettext](https://www.gnu.org/software/gettext/).
 
-If you're on Windows see [Windows specific notes](#windows-specific-notes).
+Installation on Windows
+--
 
+ReadStat now includes a Microsoft Visual Studio project file that includes
+build targets for the library and tests. See the [VS17](./VS17) folder in
+the downloaded release for a "one-click" Windows build.
+
+Alternatively, you can build ReadStat on the command line using an
+[msys2](https://msys2.github.io/) environment. After installing msys2,
+download some other packages:
+
+    pacman -S autoconf automake libtool make mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-libiconv
+
+Then start a MINGW command line (not the msys2 prompt!) and follow the UNIX
+install instructions above for this package.
 
 Language Bindings
-==
+--
 
 * Julia: [ReadStat.jl](https://github.com/queryverse/ReadStat.jl)
 * Perl 6: [ReadStat.pm6](https://github.com/WizardMac/ReadStat.pm6)
 * Python: [pyreadstat](https://github.com/Roche/pyreadstat)
 * R: [haven](https://github.com/tidyverse/haven)
+* DuckDB: [`read_stat`](<https://github.com/mettekou/duckdb-read-stat>)
 
 
 Docker
-==
+--
 
 A dockerized version is available [here](https://github.com/jbn/readstat)
 
 
 
 Command-line Usage
-==
+--
 
 Standard usage:
 
@@ -112,7 +129,7 @@ At the moment value labels are supported, but the finer nuances of converting
 format strings (e.g. `%8.2g`) are not.
 
 Command-line Usage with CSV input
-==
+--
 
 A prerequisite for CSV input is that the [libcsv](https://github.com/rgamble/libcsv)
 library is found at compile time.
@@ -230,7 +247,7 @@ The last column type is `STRING`:
 Value labels are not supported for `STRING`.
 
 Library Usage: Reading Files
-==
+--
 
 The ReadStat API is callback-based. It uses very little memory, and is suitable
 for programs with progress bars.  ReadStat uses
@@ -362,7 +379,7 @@ int main(int argc, char *argv[]) {
 ```
 
 Library Usage: Writing Files
-==
+--
 
 ReadStat can write data sets to a number of file formats, and uses largely the
 same API for each of them. Files are written incrementally, with the header
@@ -370,7 +387,7 @@ written first, followed by individual rows of data, and ending with some kind
 of trailer. (So the full data file never resides in memory.) Unlike like the
 callback-based API for reading files, the writer API consists of function that
 the developer must call in a particular order. The complete API can be found in
-src/readstat.h.
+[readstat.h](./src/readstat.h).
 
 Basic usage:
 
@@ -420,23 +437,8 @@ int main(int argc, char *argv[]) {
 }
 ```
 
-Windows specific notes
-==
-
-You need to install and configure an msys2 environment to compile ReadStat.
-
-First, download and install msys2 from [here](https://msys2.github.io/). Make
-sure you update your initial msys2 installation as described on that page.
-
-Second, install a number of additional packages at the msys2 command line:
-
-    pacman -S autoconf automake libtool mingw-w64-x86_64-toolchain ingw-w64-x86_64-cmake mingw-w64-x86_64-libiconv
-
-Finally, start a MINGW command line (not the msys2 prompt!) and follow the general install instructions for this package.
-
-
 Fuzz Testing
-==
+--
 
 To assist in fuzz testing, ReadStat ships with target files designed to work
 with [libFuzzer](http://llvm.org/docs/LibFuzzer.html). Clang 6 or later is
@@ -448,7 +450,7 @@ required.
    `corpus/`. There is a subdirectory for each sub-format (`dta104`, `dta105`,
    etc.). Currently a total of 468 files are created.
 1. If fuzz-testing has been enabled, `make` will also create fourteen fuzzer
-   targets, one for each of seven file formats, five for internally used
+   targets, one for each of seven file formats, six for internally used
    grammars, and two fuzzers for testing the compression routines.
    * `fuzz_format_dta`
    * `fuzz_format_por`
@@ -462,6 +464,7 @@ required.
    * `fuzz_grammar_sav_date`
    * `fuzz_grammar_sav_time`
    * `fuzz_grammar_spss_format`
+   * `fuzz_grammar_xport_format`
    * `fuzz_compression_sas_rle`
    * `fuzz_compression_sav`
 

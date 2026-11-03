@@ -43,23 +43,38 @@ static void sas7bcat_ctx_free(sas7bcat_ctx_t *ctx) {
 }
 
 static readstat_error_t sas7bcat_parse_value_labels(const char *value_start, size_t value_labels_len, 
-        int label_count_used, int label_count_capacity, const char *name, sas7bcat_ctx_t *ctx) {
+        int label_count_used, int label_count_capacity, int default_label_pos, int string_offset,
+        const char *name, sas7bcat_ctx_t *ctx) {
     readstat_error_t retval = READSTAT_OK;
     int i;
     const char *lbp1 = value_start;
-    uint32_t *value_offset = readstat_calloc(label_count_used, sizeof(uint32_t));
+    uint32_t *value_offset = NULL;
     /* Doubles appear to be stored as big-endian, always */
     int bswap_doubles = machine_is_little_endian();
-    int is_string = (name[0] == '$');
+    int is_string = 0;
+    char *label = NULL;
+    char *string_val = NULL;
 
+    if (name[0] == '$') {
+        is_string = 1;
+    } else if (name[0] == '@') {
+        goto cleanup; // Skip informats
+    }
+
+    value_offset = readstat_calloc(label_count_used, sizeof(uint32_t));
     if (value_offset == NULL) {
         retval = READSTAT_ERROR_MALLOC;
         goto cleanup;
     }
+    /* Mark every slot as unset so that a label index which no value entry
+     * references is detected in pass 2 instead of silently reading entry 0 */
+    for (i=0; i<label_count_used; i++) {
+        value_offset[i] = UINT32_MAX;
+    }
 
     /* Pass 1 -- find out the offset of the labels */
     for (i=0; i<label_count_capacity; i++) {
-        if (&lbp1[3] - value_start > value_labels_len || lbp1[2] < 0) {
+        if (&lbp1[4] - value_start > value_labels_len || sas_read2(&lbp1[2], ctx->bswap) < 0) {
             retval = READSTAT_ERROR_PARSE;
             goto cleanup;
         }
@@ -69,56 +84,87 @@ static readstat_error_t sas7bcat_parse_value_labels(const char *value_start, siz
                 goto cleanup;
             }
             uint32_t label_pos = sas_read4(&lbp1[10+ctx->pad1], ctx->bswap);
-            if (label_pos >= label_count_used) {
+            if (label_pos >= label_count_used || (default_label_pos > 0 && label_pos == default_label_pos - 1)) {
                 retval = READSTAT_ERROR_PARSE;
                 goto cleanup;
             }
             value_offset[label_pos] = lbp1 - value_start;
         }
-        lbp1 += 6 + lbp1[2];
+        lbp1 += 6 + sas_read2(&lbp1[2], ctx->bswap);
     }
 
     const char *lbp2 = lbp1;
 
     /* Pass 2 -- parse pairs of values & labels */
-    for (i=0; i<label_count_used && i<label_count_capacity; i++) {
-        lbp1 = value_start + value_offset[i];
+    for (i=0; i<label_count_used; i++) {
+        readstat_value_t value = { 0 };
+        int is_default_label = default_label_pos > 0 && i == default_label_pos - 1;
+        if (!is_default_label) {
+            /* A non-default label with no value entry pointing at it would
+             * otherwise read from offset 0 and emit a duplicate value */
+            if (value_offset[i] == UINT32_MAX) {
+                retval = READSTAT_ERROR_PARSE;
+                goto cleanup;
+            }
+            lbp1 = value_start + value_offset[i];
 
-        if (&lbp1[30] - value_start > value_labels_len ||
-                &lbp2[10] - value_start > value_labels_len) {
+            if (&lbp1[30] - value_start > value_labels_len) {
+                retval = READSTAT_ERROR_PARSE;
+                goto cleanup;
+            }
+            value.type = is_string ? READSTAT_TYPE_STRING : READSTAT_TYPE_DOUBLE;
+            if (is_string) {
+                size_t value_entry_len = 6 + sas_read2(&lbp1[2], ctx->bswap);
+                size_t string_start = 22 + string_offset;
+                if (string_start > value_entry_len ||
+                        &lbp1[value_entry_len] - value_start > value_labels_len) {
+                    retval = READSTAT_ERROR_PARSE;
+                    goto cleanup;
+                }
+                size_t string_len = value_entry_len - string_start;
+                char *new_string_val = realloc(string_val, 4 * string_len + 1);
+                if (new_string_val == NULL) {
+                    retval = READSTAT_ERROR_MALLOC;
+                    goto cleanup;
+                }
+                string_val = new_string_val;
+                retval = readstat_convert(string_val, 4 * string_len + 1,
+                        &lbp1[string_start], string_len, ctx->converter);
+                if (retval != READSTAT_OK)
+                    goto cleanup;
+
+                value.v.string_value = string_val;
+            } else {
+                uint64_t val = sas_read8(&lbp1[22], bswap_doubles);
+                double dval = NAN;
+                if ((val | 0xFF0000000000) == 0xFFFFFFFFFFFF) {
+                    sas_assign_tag(&value, (val >> 40));
+                } else {
+                    memcpy(&dval, &val, 8);
+                    if (dval > 0.0) {
+                        val = ~val;
+                        memcpy(&dval, &val, 8);
+                    } else {
+                        dval *= -1.0;
+                    }
+                }
+
+                value.v.double_value = dval;
+            }
+        }
+        if (&lbp2[10] > value_start + value_labels_len) {
             retval = READSTAT_ERROR_PARSE;
             goto cleanup;
-        }
-        readstat_value_t value = { .type = is_string ? READSTAT_TYPE_STRING : READSTAT_TYPE_DOUBLE };
-        char string_val[4*16+1];
-        if (is_string) {
-            size_t value_entry_len = 6 + lbp1[2];
-            retval = readstat_convert(string_val, sizeof(string_val),
-                    &lbp1[value_entry_len-16], 16, ctx->converter);
-            if (retval != READSTAT_OK)
-                goto cleanup;
-
-            value.v.string_value = string_val;
-        } else {
-            uint64_t val = sas_read8(&lbp1[22], bswap_doubles);
-            double dval = NAN;
-            if ((val | 0xFF0000000000) == 0xFFFFFFFFFFFF) {
-                sas_assign_tag(&value, (val >> 40));
-            } else {
-                memcpy(&dval, &val, 8);
-                dval *= -1.0;
-            }
-
-            value.v.double_value = dval;
         }
         size_t label_len = sas_read2(&lbp2[8], ctx->bswap);
-        if (&lbp2[10] + label_len - value_start > value_labels_len) {
-            retval = READSTAT_ERROR_PARSE;
-            goto cleanup;
+        /* Some labels seem to overflow the reported block length, truncate it */
+        /* (Observed with formats.sasbcat from GSS2021, produced with 9.0401M6X64_SR12R2 */
+        if (label_len > value_start + value_labels_len - &lbp2[10]) {
+            label_len = value_start + value_labels_len - &lbp2[10];
         }
-        if (ctx->value_label_handler) {
-            char label[4*label_len+1];
-            retval = readstat_convert(label, sizeof(label),
+        if (ctx->value_label_handler && !is_default_label) {
+            label = realloc(label, 4 * label_len + 1);
+            retval = readstat_convert(label, 4 * label_len + 1,
                     &lbp2[10], label_len, ctx->converter);
             if (retval != READSTAT_OK)
                 goto cleanup;
@@ -133,9 +179,9 @@ static readstat_error_t sas7bcat_parse_value_labels(const char *value_start, siz
     }
 
 cleanup:
-    if (value_offset)
-        free(value_offset);
-
+    free(label);
+    free(string_val);
+    free(value_offset);
     return retval;
 }
 
@@ -143,47 +189,72 @@ static readstat_error_t sas7bcat_parse_block(const char *data, size_t data_size,
     readstat_error_t retval = READSTAT_OK;
 
     size_t pad = 0;
-    int label_count_capacity = 0;
-    int label_count_used = 0;
+    uint64_t label_count_capacity = 0;
+    uint64_t label_count_used = 0;
+    uint64_t default_label_pos = 0;
+    int string_offset = 0;
     int payload_offset = 106;
-    char name[4*32+1];
+    uint16_t flags = 0;
+    char name[4*32+2]; /* room for the trailing dot */
 
     if (data_size < payload_offset)
         goto cleanup;
 
-    pad = (data[2] & 0x08) ? 4 : 0; // might be 0x10, not sure
+    flags = sas_read2(&data[2], ctx->bswap);
+    pad = (flags & 0x08) ? 4 : 0; // might be 0x10, not sure
     if (ctx->u64) {
-        label_count_capacity = sas_read4(&data[42+pad], ctx->bswap);
-        label_count_used = sas_read4(&data[50+pad], ctx->bswap);
+        if (data_size < 128 + pad)
+            goto cleanup;
+        label_count_capacity = sas_read8(&data[42+pad], ctx->bswap);
+        label_count_used = sas_read8(&data[50+pad], ctx->bswap);
+        default_label_pos = sas_read8(&data[74+pad], ctx->bswap);
+        /* Nonzero when the format's values are strings longer than 16 bytes,
+         * which shifts each value one byte to the right and NUL-pads it */
+        string_offset = sas_read4(&data[124+pad], ctx->bswap);
 
         payload_offset += 32;
     } else {
+        if (data_size < 106 + pad)
+            goto cleanup;
         label_count_capacity = sas_read4(&data[38+pad], ctx->bswap);
         label_count_used = sas_read4(&data[42+pad], ctx->bswap);
+        default_label_pos = sas_read4(&data[66+pad], ctx->bswap);
+        string_offset = sas_read2(&data[104+pad], ctx->bswap);
     }
 
-    if ((retval = readstat_convert(name, sizeof(name), &data[8], 8, ctx->converter)) != READSTAT_OK)
+    if (string_offset < 0 || default_label_pos > label_count_used) {
+        retval = READSTAT_ERROR_PARSE;
+        goto cleanup;
+    }
+
+    if ((retval = readstat_convert(name, sizeof(name) - 1, &data[8], 8, ctx->converter)) != READSTAT_OK)
         goto cleanup;
 
     if (pad) {
         pad += 16;
     }
 
-    if ((data[2] & 0x80) && !ctx->u64) { // has long name
+    if (((flags & 0x80) && !ctx->u64) || ((flags & 0x20) && ctx->u64)) { // has long name
         if (data_size < payload_offset + pad + 32)
             goto cleanup;
 
-        retval = readstat_convert(name, sizeof(name), &data[payload_offset+pad], 32, ctx->converter);
+        retval = readstat_convert(name, sizeof(name) - 1, &data[payload_offset+pad], 32, ctx->converter);
         if (retval != READSTAT_OK)
             goto cleanup;
         pad += 32;
     }
 
+    /* Present format names the way SAS does, e.g. "MYFMT." or "$MYFMT." */
+    strcat(name, ".");
+
     if (data_size < payload_offset + pad)
         goto cleanup;
 
+    if (label_count_used == 0)
+        goto cleanup;
+
     if ((retval = sas7bcat_parse_value_labels(&data[payload_offset+pad], data_size - payload_offset - pad,
-                    label_count_used, label_count_capacity, name, ctx)) != READSTAT_OK)
+            label_count_used, label_count_capacity, default_label_pos, string_offset, name, ctx)) != READSTAT_OK)
         goto cleanup;
 
 cleanup:
@@ -200,15 +271,15 @@ static readstat_error_t sas7bcat_augment_index(const char *index, size_t len, sa
             break;
 
         if (xlsr[ctx->xlsr_O_offset] == 'O') {
-            uint32_t page = 0, pos = 0;
+            uint64_t page = 0, pos = 0;
             if (ctx->u64) {
-                page = sas_read4(&xlsr[8], ctx->bswap);
-                pos = sas_read4(&xlsr[16], ctx->bswap);
+                page = sas_read8(&xlsr[8], ctx->bswap);
+                pos = sas_read2(&xlsr[16], ctx->bswap);
             } else {
-                page = sas_read2(&xlsr[4], ctx->bswap);
+                page = sas_read4(&xlsr[4], ctx->bswap);
                 pos = sas_read2(&xlsr[8], ctx->bswap);
             }
-            ctx->block_pointers[ctx->block_pointers_used++] = ((uint64_t)page << 32) + pos;
+            ctx->block_pointers[ctx->block_pointers_used++] = (page << 32) + pos;
         }
 
         if (ctx->block_pointers_used == ctx->block_pointers_capacity) {
@@ -228,7 +299,10 @@ cleanup:
 static int compare_block_pointers(const void *elem1, const void *elem2) {
     uint64_t v1 = *(const uint64_t *)elem1;
     uint64_t v2 = *(const uint64_t *)elem2;
-    return v1 - v2;
+    /* The values pack a page number into the high 32 bits, so a plain
+     * subtraction truncated to int loses that half and misorders (or reports
+     * as equal) pointers on different pages. Compare three-way instead. */
+    return (v1 > v2) - (v1 < v2);
 }
 
 static void sas7bcat_sort_index(sas7bcat_ctx_t *ctx) {
@@ -405,8 +479,12 @@ readstat_error_t readstat_parse_sas7bcat(readstat_parser_t *parser, const char *
         ctx->xlsr_O_offset += 24;
     }
 
-    if (ctx->input_encoding && ctx->output_encoding && strcmp(ctx->input_encoding, ctx->output_encoding) != 0) {
-        iconv_t converter = iconv_open(ctx->output_encoding, ctx->input_encoding);
+    const char *input_encoding = ctx->input_encoding;
+    if (input_encoding == NULL) {
+        input_encoding = SAS_DEFAULT_STRING_ENCODING;
+    }
+    if (ctx->output_encoding && strcmp(input_encoding, ctx->output_encoding) != 0) {
+        iconv_t converter = iconv_open(ctx->output_encoding, input_encoding);
         if (converter == (iconv_t)-1) {
             retval = READSTAT_ERROR_UNSUPPORTED_CHARSET;
             goto cleanup;
@@ -415,7 +493,7 @@ readstat_error_t readstat_parse_sas7bcat(readstat_parser_t *parser, const char *
     }
 
     if (ctx->metadata_handler) {
-        char file_label[4*64+1];
+        char table_name[4*32+1];
         readstat_metadata_t metadata = { 
             .file_encoding = ctx->input_encoding, /* orig encoding? */
             .modified_time = hinfo->modification_time,
@@ -424,12 +502,12 @@ readstat_error_t readstat_parse_sas7bcat(readstat_parser_t *parser, const char *
             .endianness = hinfo->little_endian ? READSTAT_ENDIAN_LITTLE : READSTAT_ENDIAN_BIG,
             .is64bit = ctx->u64
         };
-        retval = readstat_convert(file_label, sizeof(file_label), 
-                hinfo->file_label, sizeof(hinfo->file_label), ctx->converter);
+        retval = readstat_convert(table_name, sizeof(table_name),
+                hinfo->table_name, sizeof(hinfo->table_name), ctx->converter);
         if (retval != READSTAT_OK)
             goto cleanup;
 
-        metadata.file_label = file_label;
+        metadata.table_name = table_name;
 
         if (ctx->metadata_handler(&metadata, ctx->user_ctx) != READSTAT_HANDLER_OK) {
             retval = READSTAT_ERROR_USER_ABORT;
@@ -464,8 +542,9 @@ readstat_error_t readstat_parse_sas7bcat(readstat_parser_t *parser, const char *
             retval = READSTAT_ERROR_READ;
             goto cleanup;
         }
-        if (memcmp(&page[16], "XLSR", sizeof("XLSR")-1) == 0) {
-            retval = sas7bcat_augment_index(&page[16], ctx->page_size - 16, ctx);
+        int offset = ctx->u64 ? 32 : 16;
+        if (memcmp(&page[offset], "XLSR", sizeof("XLSR")-1) == 0) {
+            retval = sas7bcat_augment_index(&page[offset], ctx->page_size - offset, ctx);
             if (retval != READSTAT_OK)
                 goto cleanup;
         }

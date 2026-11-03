@@ -1,15 +1,15 @@
 #include <time.h>
 
 #define RT_MAX_ROWS                 10
-#define RT_MAX_COLS                 10
+#define RT_MAX_COLS                 20
 #define RT_MAX_LABEL_SETS            2
 #define RT_MAX_NOTES                 2
 #define RT_MAX_STRING_REFS           3
 #define RT_MAX_NOTE_SIZE           120
-#define RT_MAX_VALUE_LABELS          2
-#define RT_MAX_STRING               64
+#define RT_MAX_VALUE_LABELS          4
+#define RT_MAX_STRING               96
 #define RT_MAX_VALUE_LABEL_STRING  121
-#define MAX_TESTS_PER_GROUP 20
+#define MAX_TESTS_PER_GROUP         22
 
 
 typedef struct rt_label_set_s {
@@ -27,6 +27,10 @@ typedef struct rt_column_s {
     char                    name[RT_MAX_STRING];
     char                    label[RT_MAX_STRING];
     char                    format[RT_MAX_STRING];
+    char                    informat[RT_MAX_STRING];
+    int                     display_width;
+    int                     user_width;
+    int                     zero_width; /* pass width 0 to readstat_add_variable */
     readstat_alignment_t    alignment;
     readstat_measure_t      measure;
     readstat_type_t         type;
@@ -35,17 +39,19 @@ typedef struct rt_column_s {
     struct {
         readstat_value_t    lo;
         readstat_value_t    hi;
-    } missing_ranges[3];
+    } missing_ranges[4];
     long                    missing_ranges_count;
 
     char                    label_set[RT_MAX_STRING];
+
+    int                     skip_value_comparison;
 } rt_column_t;
 
 typedef struct rt_test_file_s {
     readstat_error_t    write_error;
     long                test_formats;
 
-    char                label[80];
+    char                label[128];
     char                table_name[32];
     struct tm           timestamp;
     long                rows;
@@ -63,6 +69,12 @@ typedef struct rt_test_file_s {
     long                string_refs_count;
 
     char                fweight[RT_MAX_STRING];
+
+    /* SAV only: after writing, overwrite the header's case count with -1
+     * (unknown) so the reader must find the rows by itself */
+    int                 unknown_row_count;
+
+    char                resource_name[80];
 } rt_test_file_t;
 
 typedef struct rt_test_group_s {

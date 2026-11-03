@@ -17,11 +17,11 @@ extern "C" {
 #include <math.h>
 #include <stdio.h>
 
-enum {
-    READSTAT_HANDLER_OK,
-    READSTAT_HANDLER_ABORT,
-    READSTAT_HANDLER_SKIP_VARIABLE
-};
+/* Handler return codes. These are plain ints, matching the handlers' return
+ * type, so that C++ lambdas returning them convert to handler pointers. */
+#define READSTAT_HANDLER_OK             0
+#define READSTAT_HANDLER_ABORT          1
+#define READSTAT_HANDLER_SKIP_VARIABLE  2
 
 typedef enum readstat_type_e {
     READSTAT_TYPE_STRING,
@@ -104,10 +104,29 @@ typedef enum readstat_error_e {
     READSTAT_ERROR_TOO_FEW_COLUMNS,
     READSTAT_ERROR_TOO_MANY_COLUMNS,
     READSTAT_ERROR_NAME_IS_ZERO_LENGTH,
-    READSTAT_ERROR_BAD_TIMESTAMP_VALUE
+    READSTAT_ERROR_BAD_TIMESTAMP_VALUE,
+    READSTAT_ERROR_BAD_MR_STRING,
+    READSTAT_ERROR_MISSING_RANGES_NOT_SUPPORTED,
+    READSTAT_ERROR_BAD_STRING_WIDTH,
+    READSTAT_ERROR_LABEL_IS_TOO_LONG,
+    READSTAT_ERROR_DUPLICATE_VALUE_LABEL,
+    READSTAT_ERROR_UNUSED_STRING_REF,
+    READSTAT_ERROR_DUPLICATE_VARIABLE_NAME
 } readstat_error_t;
 
 const char *readstat_error_message(readstat_error_t error_code);
+
+typedef struct mr_set_s {
+    char   type;
+    char  *name;
+    char  *label;
+    int    is_dichotomy;
+    int    counted_value;
+    char **subvariables;
+    int    num_subvars;
+    char  *counted_string;      /* counted value as written, e.g. "Yes" for string sets */
+    int    label_from_var_label; /* subtype 19 sets with LABELSOURCE=VARLABEL */
+} mr_set_t;
 
 typedef struct readstat_metadata_s {
     int64_t     row_count;
@@ -121,10 +140,20 @@ typedef struct readstat_metadata_s {
     const char *file_label;
     const char *file_encoding;
     unsigned int is64bit:1;
+    size_t multiple_response_sets_length;
+    mr_set_t *mr_sets;
 } readstat_metadata_t;
 
+/* If the row count is unknown (e.g. it's an XPORT or POR file, or an SAV
+ * file created with non-conforming software), then readstat_get_row_count
+ * returns -1.
+ */
 int readstat_get_row_count(readstat_metadata_t *metadata);
 int readstat_get_var_count(readstat_metadata_t *metadata);
+/* DTA, SAV, POR and XPORT files store the timestamp as a wall-clock time with
+ * no time zone. ReadStat interprets it in the local time zone (mktime), so the
+ * same file gives different values on machines in different zones; set TZ
+ * for consistent results. The writers likewise use localtime. */
 time_t readstat_get_creation_time(readstat_metadata_t *metadata);
 time_t readstat_get_modified_time(readstat_metadata_t *metadata);
 int readstat_get_file_format_version(readstat_metadata_t *metadata);
@@ -133,7 +162,11 @@ readstat_compress_t readstat_get_compression(readstat_metadata_t *metadata);
 readstat_endian_t readstat_get_endianness(readstat_metadata_t *metadata);
 const char *readstat_get_table_name(readstat_metadata_t *metadata);
 const char *readstat_get_file_label(readstat_metadata_t *metadata);
+/* Returns NULL if the file doesn't record an encoding (e.g. SAS7BDAT and
+ * SAS7BCAT files with an encoding byte of 0). */
 const char *readstat_get_file_encoding(readstat_metadata_t *metadata);
+const mr_set_t *readstat_get_multiple_response_sets(readstat_metadata_t *metadata);
+size_t readstat_get_multiple_response_sets_length(readstat_metadata_t *metadata);
 
 typedef struct readstat_value_s {
     union {
@@ -186,6 +219,7 @@ typedef struct readstat_variable_s {
     int                     index;
     char                    name[300];
     char                    format[256];
+    char                    informat[256];
     char                    label[1024];
     readstat_label_set_t   *label_set;
     off_t                   offset;
@@ -201,9 +235,9 @@ typedef struct readstat_variable_s {
 } readstat_variable_t;
 
 typedef struct readstat_schema_entry_s {
-    int                 row;
-    int                 col;
-    int                 len;
+    uint32_t            row;
+    uint32_t            col;
+    uint32_t            len;
     int                 skip;
     readstat_variable_t variable;
     char                labelset[32];
@@ -212,8 +246,8 @@ typedef struct readstat_schema_entry_s {
 
 typedef struct readstat_schema_s {
     char                    filename[255];
-    int                     rows_per_observation;
-    int                     cols_per_observation;
+    uint32_t                rows_per_observation;
+    uint32_t                cols_per_observation;
     int                     first_line;
     int                     entry_count;
     char                    field_delimiter;
@@ -268,9 +302,12 @@ int readstat_variable_get_index_after_skipping(const readstat_variable_t *variab
 const char *readstat_variable_get_name(const readstat_variable_t *variable);
 const char *readstat_variable_get_label(const readstat_variable_t *variable);
 const char *readstat_variable_get_format(const readstat_variable_t *variable);
+const char *readstat_variable_get_informat(const readstat_variable_t *variable);
 readstat_type_t readstat_variable_get_type(const readstat_variable_t *variable);
 readstat_type_class_t readstat_variable_get_type_class(const readstat_variable_t *variable);
 size_t readstat_variable_get_storage_width(const readstat_variable_t *variable);
+/* For SPSS files the display width is the "Columns" property. The "Width"
+ * property is part of the format; see readstat_variable_get_format (e.g. "F5.0"). */
 int readstat_variable_get_display_width(const readstat_variable_t *variable);
 readstat_measure_t readstat_variable_get_measure(const readstat_variable_t *variable);
 readstat_alignment_t readstat_variable_get_alignment(const readstat_variable_t *variable);
@@ -295,7 +332,11 @@ typedef int (*readstat_value_label_handler)(const char *val_labels,
 typedef void (*readstat_error_handler)(const char *error_message, void *ctx);
 typedef int (*readstat_progress_handler)(double progress, void *ctx);
 
-#if defined _WIN32 || defined __CYGWIN__
+#if defined(_MSC_VER)
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+typedef __int64 readstat_off_t;
+#elif defined _WIN32 || defined __CYGWIN__
 typedef _off64_t readstat_off_t;
 #elif defined _AIX
 typedef off64_t readstat_off_t;
@@ -457,6 +498,7 @@ typedef struct readstat_writer_s {
     int                         is_64bit; // SAS only
     readstat_compress_t         compression;
     time_t                      timestamp;
+    double                      timestamp_fraction; // sub-second part of timestamp
 
     readstat_variable_t       **variables;
     long                        variables_count;
@@ -479,7 +521,7 @@ typedef struct readstat_writer_s {
 
     int                         row_count;
     int                         current_row;
-    char                        file_label[100];
+    char                        file_label[257];
     char                        table_name[33];
     const readstat_variable_t  *fweight_variable;
 
@@ -502,6 +544,12 @@ readstat_writer_t *readstat_writer_init(void);
 readstat_error_t readstat_set_data_writer(readstat_writer_t *writer, readstat_data_writer data_writer);
 
 // Next define your value labels, if any. Create as many named sets as you'd like.
+//
+// Label sets, variables, notes, and string refs must all be registered before
+// the first call to readstat_begin_row() (or to readstat_end_writing() for an
+// empty data set): the file header and section offsets are computed from them
+// at that point. After it, readstat_add_label_set(), readstat_add_variable()
+// and readstat_add_string_ref() return NULL and readstat_add_note() does nothing.
 readstat_label_set_t *readstat_add_label_set(readstat_writer_t *writer, readstat_type_t type, const char *name);
 void readstat_label_double_value(readstat_label_set_t *label_set, double value, const char *label);
 void readstat_label_int32_value(readstat_label_set_t *label_set, int32_t value, const char *label);
@@ -515,9 +563,12 @@ readstat_variable_t *readstat_add_variable(readstat_writer_t *writer, const char
         size_t storage_width);
 void readstat_variable_set_label(readstat_variable_t *variable, const char *label);
 void readstat_variable_set_format(readstat_variable_t *variable, const char *format);
+void readstat_variable_set_informat(readstat_variable_t *variable, const char *informat);
 void readstat_variable_set_label_set(readstat_variable_t *variable, readstat_label_set_t *label_set);
 void readstat_variable_set_measure(readstat_variable_t *variable, readstat_measure_t measure);
 void readstat_variable_set_alignment(readstat_variable_t *variable, readstat_alignment_t alignment);
+/* For SPSS files this sets the "Columns" property; set "Width" with
+ * readstat_variable_set_format. */
 void readstat_variable_set_display_width(readstat_variable_t *variable, int display_width);
 readstat_error_t readstat_variable_add_missing_double_value(readstat_variable_t *variable, double value);
 readstat_error_t readstat_variable_add_missing_double_range(readstat_variable_t *variable, double lo, double hi);
@@ -536,6 +587,13 @@ void readstat_add_note(readstat_writer_t *writer, const char *note);
 // String refs are used for creating a READSTAT_TYPE_STRING_REF column,
 // which is only supported in Stata. String references can be shared
 // across columns, and inserted with readstat_insert_string_ref().
+// Register every string ref before the first row is written (see above);
+// afterwards this function returns NULL. Stata only allows string refs
+// that appear in the data, and the section offsets written ahead of the
+// data account for every registered ref, so readstat_end_writing() fails
+// with READSTAT_ERROR_UNUSED_STRING_REF if a registered ref was never
+// inserted. readstat_insert_missing_value() on a STRING_REF column
+// writes Stata's empty string reference.
 readstat_string_ref_t *readstat_add_string_ref(readstat_writer_t *writer, const char *string);
 readstat_string_ref_t *readstat_get_string_ref(readstat_writer_t *writer, int index);
 

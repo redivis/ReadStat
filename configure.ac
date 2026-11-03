@@ -1,15 +1,18 @@
-# Update this with each release
-AC_INIT([ReadStat], [1.1.0], [emmiller@gmail.com], [readstat], [https://github.com/WizardMac/ReadStat])
+# Update this with each release. Be sure to change VS17/PropertySheet.props too
+AC_INIT([ReadStat],[1.1.9],[https://github.com/WizardMac/ReadStat/issues],[readstat],[https://github.com/WizardMac/ReadStat])
+AC_CONFIG_MACRO_DIRS([m4])
 AM_INIT_AUTOMAKE([foreign subdir-objects])
 AM_SILENT_RULES([yes])
 
 # Don't forget to update these too
 READSTAT_MAJOR_VERSION=1
 READSTAT_MINOR_VERSION=1
-READSTAT_MICRO_VERSION=0
+READSTAT_MICRO_VERSION=9
 
 # libtool stuff, see https://www.gnu.org/software/libtool/manual/html_node/Updating-version-info.html#Updating-version-info
 READSTAT_VERSION=$READSTAT_MAJOR_VERSION.$READSTAT_MINOR_VERSION.$READSTAT_MICRO_VERSION
+# TODO the following logic is broken. Fix it during the next minor update.
+# See https://github.com/libxls/libxls/commit/cf5b0500e78e77a70361c6de12b08230590857dc
 READSTAT_VERSION_INFO=`expr $READSTAT_MAJOR_VERSION + $READSTAT_MINOR_VERSION`:$READSTAT_MICRO_VERSION:$READSTAT_MINOR_VERSION
 
 AC_SUBST(READSTAT_VERSION)
@@ -38,11 +41,9 @@ AC_ARG_ENABLE([fuzz-testing], AS_HELP_STRING([--enable-fuzz-testing], ["Enable f
 AM_CONDITIONAL([FUZZER_ENABLED], test "x$fuzzer" = "xyes")
 AC_SUBST([SANITIZERS])
 
-AM_ICONV
-
 AC_CANONICAL_HOST
 AS_CASE([$host],
-	[*linux*|*bsd*|*mingw*|*cygwin*], [EXTRA_LIBS="-lm"],
+	[*linux*|*bsd*|*mingw*|*cygwin*|*gnu*], [EXTRA_LIBS="-lm"],
 	[EXTRA_LIBS=""])
 AC_SUBST([EXTRA_LIBS])
 
@@ -53,9 +54,17 @@ AS_CASE([$host],
 AC_SUBST([EXTRA_WARNINGS])
 
 AS_CASE([$host],
-	[*mingw*|*cygwin*], [EXTRA_LDFLAGS="$LTLIBICONV -no-undefined"],
-	[EXTRA_LDFLAGS="$LTLIBICONV"])
+	[*mingw*|*cygwin*], [EXTRA_LDFLAGS="-liconv -no-undefined"],
+	[*darwin*], [EXTRA_LDFLAGS="-liconv"],
+	[EXTRA_LDFLAGS=""])
 AC_SUBST([EXTRA_LDFLAGS])
+
+AS_CASE([$host],
+	[*mingw*],
+	[
+		AC_CHECK_FUNCS([_spawnv], [], [CFLAGS="$CFLAGS -D_spawnv=spawnv"])
+	],
+	[CFLAGS="$CFLAGS"])
 
 AC_ARG_VAR([LIB_FUZZING_ENGINE], [Location of prebuilt fuzzing engine library])
 AC_SUBST([LIB_FUZZING_ENGINE])
@@ -76,15 +85,19 @@ AM_CONDITIONAL([HAVE_ZLIB], test "$ac_cv_lib_z_deflate" = yes)
 
 AM_CONDITIONAL([CODE_COVERAGE_ENABLED], test "x$code_coverage" = "xyes")
 
-AC_OUTPUT([Makefile])
+AC_CONFIG_FILES([Makefile])
+AC_OUTPUT
 
 AC_MSG_RESULT([
 Configuration:
 
 C compiler: $CC
-C++ compiler: $CXX
 CFLAGS: $CFLAGS
+LD: $LD
+
+C++ compiler: $CXX
 CXXFLAGS: $CXXFLAGS
+CXXLD: $CXXLD
 
 Host: $host
 Extra warnings: $EXTRA_WARNINGS

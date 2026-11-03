@@ -20,12 +20,18 @@ typedef struct dta_header64_s {
     uint64_t         nobs;
 } dta_header64_t;
 
+/* Some compilers will pack the elements, but still round up
+ * the total size of the structure. So use macros in place of
+ * sizeof(dta_117_strl_header_t)/sizeof(dta_118_strl_header_t).
+ */
 typedef struct dta_117_strl_header_s {
     uint32_t        v;
     uint32_t        o;
     unsigned char   type;
     int32_t         len;
 } dta_117_strl_header_t;
+
+#define SIZEOF_DTA_117_STRL_HEADER_T 13
 
 typedef struct dta_118_strl_header_s {
     uint32_t        v;
@@ -34,10 +40,12 @@ typedef struct dta_118_strl_header_s {
     int32_t         len;
 } dta_118_strl_header_t;
 
+#define SIZEOF_DTA_118_STRL_HEADER_T 17
+
 #pragma pack(pop)
 
 typedef struct dta_strl_s {
-    uint16_t        v;
+    uint32_t        v;
     uint64_t        o;
     unsigned char   type;
     size_t          len;
@@ -173,6 +181,7 @@ typedef struct dta_ctx_s {
 #define DTA_OLD_TYPE_CODE_FLOAT    'f'
 #define DTA_OLD_TYPE_CODE_DOUBLE   'd'
 
+int dta_format_is_supported(int ds_format);
 dta_ctx_t *dta_ctx_alloc(readstat_io_t *io);
 readstat_error_t dta_ctx_init(dta_ctx_t *ctx, uint32_t nvar, uint64_t nobs, 
         unsigned char byteorder, unsigned char ds_format,

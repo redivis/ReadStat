@@ -1,7 +1,7 @@
 #include <stdio.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "../../readstat.h"
@@ -17,7 +17,7 @@ typedef struct mod_readstat_ctx_s {
     long var_count;
     long row_count;
 
-    int out_fd;
+    FILE *out_file;
 
     unsigned int is_sav:1;
     unsigned int is_zsav:1;
@@ -58,7 +58,7 @@ rs_module_t rs_mod_readstat = {
 
 static ssize_t write_data(const void *bytes, size_t len, void *ctx) {
     mod_readstat_ctx_t *mod_ctx = (mod_readstat_ctx_t *)ctx;
-    return write(mod_ctx->out_fd, bytes, len);
+    return fwrite(bytes, 1, len, mod_ctx->out_file);
 }
 
 static int accept_file(const char *filename) {
@@ -70,23 +70,57 @@ static int accept_file(const char *filename) {
             rs_ends_with(filename, ".xpt"));
 }
 
+/* Derives a SAS member name from a path: the base name without extension,
+ * upper-cased, with characters SAS does not allow in names replaced by
+ * underscores, and truncated to 32 characters. */
+static void set_table_name_from_filename(const char *filename, char *table_name, size_t table_name_len) {
+    const char *base = filename;
+    const char *p;
+    size_t len = 0;
+    for (p=filename; *p; p++) {
+        if (*p == '/' || *p == '\\')
+            base = p + 1;
+    }
+    for (p=base; *p && *p != '.' && len + 1 < table_name_len; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (isalnum(c)) {
+            table_name[len++] = toupper(c);
+        } else {
+            table_name[len++] = '_';
+        }
+    }
+    if (len == 0) {
+        snprintf(table_name, table_name_len, "DATASET");
+        return;
+    }
+    if (isdigit((unsigned char)table_name[0]))
+        table_name[0] = '_';
+    table_name[len] = '\0';
+}
+
 static void *ctx_init(const char *filename) {
     mod_readstat_ctx_t *mod_ctx = malloc(sizeof(mod_readstat_ctx_t));
-    mod_ctx->label_set_dict = ck_hash_table_init(1024);
+    mod_ctx->label_set_dict = ck_hash_table_init(1024, 16);
     mod_ctx->is_sav = rs_ends_with(filename, ".sav");
     mod_ctx->is_zsav = rs_ends_with(filename, ".zsav");
     mod_ctx->is_dta = rs_ends_with(filename, ".dta");
     mod_ctx->is_por = rs_ends_with(filename, ".por");
     mod_ctx->is_sas7bdat = rs_ends_with(filename, ".sas7bdat");
     mod_ctx->is_xport = rs_ends_with(filename, ".xpt");
-    mod_ctx->out_fd = open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (mod_ctx->out_fd == -1) {
+    mod_ctx->out_file = fopen(filename, "wb");
+    if (mod_ctx->out_file == NULL) {
         fprintf(stderr, "Error opening %s for writing: %s\n", filename, strerror(errno));
         return NULL;
     }
 
     mod_ctx->writer = readstat_writer_init();
     readstat_writer_set_file_label(mod_ctx->writer, "Created by ReadStat <https://github.com/WizardMac/ReadStat>");
+    if (mod_ctx->is_sas7bdat) {
+        /* SAS expects the member name stored in the file to match the file name */
+        char table_name[33];
+        set_table_name_from_filename(filename, table_name, sizeof(table_name));
+        readstat_writer_set_table_name(mod_ctx->writer, table_name);
+    }
     readstat_set_data_writer(mod_ctx->writer, &write_data);
 
     return mod_ctx;
@@ -95,8 +129,8 @@ static void *ctx_init(const char *filename) {
 void finish_file(void *ctx) {
     mod_readstat_ctx_t *mod_ctx = (mod_readstat_ctx_t *)ctx;
     if (mod_ctx) {
-        if (mod_ctx->out_fd != -1)
-            close(mod_ctx->out_fd);
+        if (mod_ctx->out_file)
+            fclose(mod_ctx->out_file);
         if (mod_ctx->label_set_dict)
             ck_hash_table_free(mod_ctx->label_set_dict);
         if (mod_ctx->writer)
@@ -167,6 +201,7 @@ static int handle_variable(int index, readstat_variable_t *variable,
     readstat_type_t type = readstat_variable_get_type(variable);
     const char *name = readstat_variable_get_name(variable);
     const char *label = readstat_variable_get_label(variable);
+    const char *format = readstat_variable_get_format(variable);
     size_t storage_width = readstat_variable_get_storage_width(variable);
     int display_width = readstat_variable_get_display_width(variable);
     int missing_ranges_count = readstat_variable_get_missing_ranges_count(variable);
@@ -181,6 +216,8 @@ static int handle_variable(int index, readstat_variable_t *variable,
         readstat_variable_set_label_set(new_variable, label_set);
         if (mod_ctx->is_sas7bdat) {
             readstat_variable_set_format(new_variable, val_labels);
+        } else if (mod_ctx->is_dta) {
+            readstat_variable_set_format(new_variable, format);
         }
     }
 
@@ -240,14 +277,14 @@ static int handle_value(int obs_index, readstat_variable_t *old_variable, readst
         }
         error = readstat_begin_row(writer);
         if (error != READSTAT_OK) {
-            fprintf(stderr, "Error beginning row: %s\n", readstat_error_message(error));
+            fprintf(stderr, "Error beginning row #%d: %s\n", obs_index, readstat_error_message(error));
             goto cleanup;
         }
     }
 
     if (readstat_value_is_system_missing(value)) {
         error = readstat_insert_missing_value(writer, variable);
-    } else if (mod_ctx->is_dta && readstat_value_is_tagged_missing(value)) {
+    } else if ((mod_ctx->is_dta || mod_ctx->is_sas7bdat) && readstat_value_is_tagged_missing(value)) {
         error = readstat_insert_tagged_missing_value(writer, variable, value.tag);
     } else if (type == READSTAT_TYPE_STRING) {
         error = readstat_insert_string_value(writer, variable, readstat_string_value(value));

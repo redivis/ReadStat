@@ -7,15 +7,22 @@
 #include "../readstat_writer.h"
 #include "readstat_sas.h"
 #include "readstat_xport.h"
+#include "readstat_xport_parse_format.h"
 #include "ieee.h"
 
-#define XPORT_DEFAULT_VERISON   8
+#define XPORT_DEFAULT_VERSION   8
 #define RECORD_LEN 80
 
-static void copypad(char *dst, size_t dst_len, const char *src) {
-    strncpy(dst, src, dst_len);
-    if (strlen(src) < dst_len)
-        memset(&dst[strlen(src)], ' ', dst_len-strlen(src));
+#if defined _MSC_VER
+#define restrict __restrict
+#endif
+
+static void copypad(char * restrict dst, size_t dst_len, const char * restrict src) {
+    char *dst_end = dst + dst_len;
+    while (dst < dst_end && *src)
+        *dst++ = *src++;
+    while (dst < dst_end)
+        *dst++ = ' ';
 }
 
 static readstat_error_t xport_write_bytes(readstat_writer_t *writer, const void *bytes, size_t len) {
@@ -42,11 +49,20 @@ cleanup:
     return retval;
 }
 
-static readstat_error_t xport_write_header_record_v8(readstat_writer_t *writer, 
+static readstat_error_t xport_write_header_record_obsv8(readstat_writer_t *writer, 
+        int row_count) {
+    char record[RECORD_LEN+1];
+    snprintf(record, sizeof(record),
+            "HEADER RECORD*******OBSV8   HEADER RECORD!!!!!!!" "%15d",
+            row_count);
+    return xport_write_record(writer, record);
+}
+
+static readstat_error_t xport_write_header_record_labelv8(readstat_writer_t *writer, 
         xport_header_record_t *xrecord) {
     char record[RECORD_LEN+1];
     snprintf(record, sizeof(record),
-            "HEADER RECORD*******%-8sHEADER RECORD!!!!!!!%-30d",
+            "HEADER RECORD*******%-8sHEADER RECORD!!!!!!!" "%-5d",
             xrecord->name, xrecord->num1);
     return xport_write_record(writer, record);
 }
@@ -85,9 +101,11 @@ static readstat_error_t xport_write_variables(readstat_writer_t *writer) {
         readstat_variable_t *variable = readstat_get_variable(writer, i);
         size_t width = xport_variable_width(variable->type, variable->user_width);
         xport_namestr_t namestr = { 
-            .nvar0 = i,
+            .nvar0 = i+1,
             .nlng = width,
-            .npos = offset
+            .npos = offset,
+            .niform = "        ",
+            .nform = "        "
         };
         if (readstat_variable_get_type_class(variable) == READSTAT_TYPE_CLASS_STRING) {
             namestr.ntype = SAS_COLUMN_TYPE_CHR;
@@ -99,21 +117,40 @@ static readstat_error_t xport_write_variables(readstat_writer_t *writer) {
         copypad(namestr.nlabel, sizeof(namestr.nlabel), variable->label);
 
         if (variable->format[0]) {
-            int decimals = 0;
-            int width = 0;
-            char name[24];
+            xport_format_t format;
 
-            sscanf(variable->format, "%s%d.%d", name, &width, &decimals);
+            retval = xport_parse_format(variable->format, strlen(variable->format),
+                    &format, NULL, NULL);
+            if (retval != READSTAT_OK)
+                goto cleanup;
 
-            copypad(namestr.nform, sizeof(namestr.nform), name);
-            namestr.nfl = width;
-            namestr.nfd = decimals;
+            copypad(namestr.nform, sizeof(namestr.nform), format.name);
+            namestr.nfl = format.width;
+            namestr.nfd = format.decimals;
 
-            copypad(namestr.niform, sizeof(namestr.niform), name);
-            namestr.nifl = width;
-            namestr.nifd = decimals;
+            if (strlen(format.name) > 8) {
+                any_has_long_format = 1;
+                needs_long_record = 1;
+            }
+        } else {
+            namestr.nfl = variable->display_width;
+            namestr.nfd = variable->decimals;
+        }
 
-            if (strlen(name) > 8) {
+        if (variable->informat[0]) {
+            xport_format_t informat;
+
+            retval = xport_parse_format(variable->informat, strlen(variable->informat),
+                    &informat, NULL, NULL);
+
+            if (retval != READSTAT_OK)
+                goto cleanup;
+
+            copypad(namestr.niform, sizeof(namestr.niform), informat.name);
+            namestr.nifl = informat.width;
+            namestr.nifd = informat.decimals;
+
+            if (strlen(informat.name) > 8) {
                 any_has_long_format = 1;
                 needs_long_record = 1;
             }
@@ -155,7 +192,7 @@ static readstat_error_t xport_write_variables(readstat_writer_t *writer) {
         if (any_has_long_format) {
             strcpy(header.name, "LABELV9");
         }
-        retval = xport_write_header_record_v8(writer, &header);
+        retval = xport_write_header_record_labelv8(writer, &header);
         if (retval != READSTAT_OK)
             goto cleanup;
 
@@ -163,31 +200,41 @@ static readstat_error_t xport_write_variables(readstat_writer_t *writer) {
             readstat_variable_t *variable = readstat_get_variable(writer, i);
             size_t label_len = strlen(variable->label);
             size_t name_len = strlen(variable->name);
+            size_t format_len = strlen(variable->format);
+            size_t informat_len = strlen(variable->informat);
             int has_long_label = 0;
             int has_long_format = 0;
-            int format_len = 0;
-            char format_name[24];
-            memset(format_name, 0, sizeof(format_name));
 
             has_long_label = (label_len > 40);
 
             if (variable->format[0]) {
-                int decimals = 2;
-                int width = 8;
+                xport_format_t format;
 
-                int matches = sscanf(variable->format, "%s%d.%d", format_name, &width, &decimals);
-                if (matches < 1) {
-                    retval = READSTAT_ERROR_BAD_FORMAT_STRING;
+                retval = xport_parse_format(variable->format, strlen(variable->format),
+                        &format, NULL, NULL);
+                if (retval != READSTAT_OK)
                     goto cleanup;
+
+                if (strlen(format.name) > 8) {
+                    has_long_format = 1;
                 }
-                format_len = strlen(format_name);
-                if (format_len > 8) {
+            }
+
+            if (variable->informat[0]) {
+                xport_format_t informat;
+
+                retval = xport_parse_format(variable->informat, strlen(variable->informat),
+                        &informat, NULL, NULL);
+                if (retval != READSTAT_OK)
+                    goto cleanup;
+
+                if (strlen(informat.name) > 8) {
                     has_long_format = 1;
                 }
             }
 
             if (has_long_format) {
-                uint16_t labeldef[5] = { i, name_len, format_len, format_len, label_len };
+                uint16_t labeldef[5] = { i+1, name_len, label_len, format_len, informat_len };
 
                 if (machine_is_little_endian()) {
                     labeldef[0] = byteswap2(labeldef[0]);
@@ -205,20 +252,20 @@ static readstat_error_t xport_write_variables(readstat_writer_t *writer) {
                 if (retval != READSTAT_OK)
                     goto cleanup;
 
-                retval = readstat_write_string(writer, format_name);
-                if (retval != READSTAT_OK)
-                    goto cleanup;
-
-                retval = readstat_write_string(writer, format_name);
-                if (retval != READSTAT_OK)
-                    goto cleanup;
-
                 retval = readstat_write_string(writer, variable->label);
                 if (retval != READSTAT_OK)
                     goto cleanup;
 
+                retval = readstat_write_string(writer, variable->format);
+                if (retval != READSTAT_OK)
+                    goto cleanup;
+
+                retval = readstat_write_string(writer, variable->informat);
+                if (retval != READSTAT_OK)
+                    goto cleanup;
+
             } else if (has_long_label) {
-                uint16_t labeldef[3] = { i, name_len, label_len };
+                uint16_t labeldef[3] = { i+1, name_len, label_len };
 
                 if (machine_is_little_endian()) {
                     labeldef[0] = byteswap2(labeldef[0]);
@@ -348,12 +395,12 @@ static readstat_error_t xport_write_namestr_header_record(readstat_writer_t *wri
 }
 
 static readstat_error_t xport_write_obs_header_record(readstat_writer_t *writer) {
+    if (writer->version == 8) {
+        return xport_write_header_record_obsv8(writer, writer->row_count);
+    }
     xport_header_record_t xrecord = { 
         .name = "OBS"
     };
-    if (writer->version == 8) {
-        strcpy(xrecord.name, "OBSV8");
-    }
     return xport_write_header_record(writer, &xrecord);
 }
 
@@ -509,21 +556,23 @@ static readstat_error_t xport_metadata_ok(void *writer_ctx) {
         return READSTAT_ERROR_UNSUPPORTED_FILE_FORMAT_VERSION;
 
     if (writer->table_name[0]) {
-        if (writer->version == 8) {
-            return sas_validate_name(writer->table_name, 32);
-        }
-        if (writer->version == 5) {
-            return sas_validate_name(writer->table_name, 8);
-        }
+        readstat_error_t retval = sas_validate_name(writer->table_name,
+                writer->version == 8 ? 32 : 8);
+        if (retval != READSTAT_OK)
+            return retval;
     }
 
-    return READSTAT_OK;
+    return sas_validate_unique_names(writer);
+}
+
+static readstat_error_t xport_v5_validate_variable(const readstat_variable_t *variable) {
+    return sas_validate_name(readstat_variable_get_name(variable), 8);
 }
 
 readstat_error_t readstat_begin_writing_xport(readstat_writer_t *writer, void *user_ctx, long row_count) {
 
     if (writer->version == 0)
-        writer->version = XPORT_DEFAULT_VERISON;
+        writer->version = XPORT_DEFAULT_VERSION;
 
     writer->callbacks.metadata_ok = &xport_metadata_ok;
     writer->callbacks.write_int8 = &xport_write_int8;
@@ -538,7 +587,11 @@ readstat_error_t readstat_begin_writing_xport(readstat_writer_t *writer, void *u
     writer->callbacks.write_missing_tagged = &xport_write_missing_tagged;
 
     writer->callbacks.variable_width = &xport_variable_width;
-    writer->callbacks.variable_ok = &sas_validate_variable;
+    if (writer->version == 5) {
+        writer->callbacks.variable_ok = &xport_v5_validate_variable;
+    } else {
+        writer->callbacks.variable_ok = &sas_validate_variable;
+    }
 
     writer->callbacks.begin_data = &xport_begin_data;
     writer->callbacks.end_data = &xport_end_data;
