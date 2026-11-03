@@ -112,6 +112,9 @@ typedef struct rt_parse_ctx_s {
     long             var_index;
     long             obs_index;
 
+    /* Redivis: read the file through IO that can't seek back or to the end, as a pipe can't */
+    int              is_stream;
+
     long             variables_count;
     long             value_labels_count;
     long             notes_count;

@@ -148,11 +148,13 @@ noinst_HEADERS = \
        src/bin/write/mod_xlsx.h \
        src/bin/write/module.h \
        src/bin/write/module_util.h \
+       src/bin/write/sas_values.h \
        src/bin/util/main.h \
        src/bin/util/file_format.h \
        src/bin/util/quote_and_escape.h \
        src/bin/util/readstat_dta_days.h \
        src/bin/util/readstat_sav_date.h \
+       src/bin/util/stream_io.h \
        src/fuzz/fuzz_format.h \
        src/test/test_buffer.h \
        src/test/test_buffer_io.h \
@@ -182,12 +184,14 @@ readstat_SOURCES = \
 	src/bin/write/mod_csv.c \
 	src/bin/write/mod_readstat.c \
 	src/bin/write/module_util.c \
+	src/bin/write/sas_values.c \
 	src/bin/util/file_format.c \
 	src/bin/util/quote_and_escape.c \
 	src/bin/util/readstat_dta_days.c \
-	src/bin/util/readstat_sav_date.c
+	src/bin/util/readstat_sav_date.c \
+	src/bin/util/stream_io.c
 
-readstat_LDADD = libreadstat.la
+readstat_LDADD = libreadstat.la -lm
 readstat_CFLAGS = -DREADSTAT_VERSION=\"@READSTAT_VERSION@\" -Wall -Werror -pedantic-errors -std=c99
 if HAVE_ZLIB
 readstat_CFLAGS += -DHAVE_ZLIB=1

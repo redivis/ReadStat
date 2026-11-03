@@ -35,6 +35,24 @@ readstat_off_t rt_seek_handler(readstat_off_t offset,
     return newpos;
 }
 
+/* Redivis: seeks like a pipe read forward: no seeking back, or to the end, whose position isn't known */
+readstat_off_t rt_stream_seek_handler(readstat_off_t offset,
+        readstat_io_flags_t whence, void *io_ctx) {
+    rt_buffer_ctx_t *buffer_ctx = (rt_buffer_ctx_t *)io_ctx;
+    readstat_off_t newpos = -1;
+    if (whence == READSTAT_SEEK_SET) {
+        newpos = offset;
+    } else if (whence == READSTAT_SEEK_CUR) {
+        newpos = buffer_ctx->pos + offset;
+    }
+
+    if (newpos < buffer_ctx->pos || newpos > buffer_ctx->buffer->used)
+        return -1;
+
+    buffer_ctx->pos = newpos;
+    return newpos;
+}
+
 ssize_t rt_read_handler(void *buf, size_t nbytes, void *io_ctx) {
     rt_buffer_ctx_t *buffer_ctx = (rt_buffer_ctx_t *)io_ctx;
     ssize_t bytes_copied = 0;

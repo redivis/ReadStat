@@ -38,6 +38,8 @@ typedef struct subheader_pointer_s {
 typedef struct sas7bdat_ctx_s {
     readstat_callbacks_t handle;
     int64_t              file_size;
+    /* Redivis: the input can't seek (e.g. a pipe), so it's parsed in a single forward pass */
+    int                  is_stream;
 
     int            little_endian;
     int            u64;
@@ -139,6 +141,8 @@ static void sas7bdat_ctx_free(sas7bdat_ctx_t *ctx) {
 }
 
 static readstat_error_t sas7bdat_update_progress(sas7bdat_ctx_t *ctx) {
+    if (ctx->is_stream)
+        return READSTAT_OK;
     readstat_io_t *io = ctx->io;
     return io->update(ctx->file_size, ctx->handle.progress, ctx->user_ctx, io->io_ctx);
 }
@@ -1112,6 +1116,16 @@ static readstat_error_t sas7bdat_parse_moved_row(uint64_t page_index, uint64_t s
     char *page = ctx->moved_page;
 
     if (ctx->moved_page_index != (int64_t)page_index) {
+        if (ctx->is_stream) {
+            /* Redivis: the row lives on another page, which a forward-only stream can't go back (or skip ahead) to */
+            retval = READSTAT_ERROR_SEEK;
+            if (ctx->handle.error) {
+                snprintf(ctx->error_buf, sizeof(ctx->error_buf), "ReadStat: Row stored on page %" PRIu64
+                        ", which can't be read from a stream; read the file from disk instead", page_index);
+                ctx->handle.error(ctx->error_buf, ctx->user_ctx);
+            }
+            goto cleanup;
+        }
         saved_pos = io->seek(0, READSTAT_SEEK_CUR, io->io_ctx);
         if (saved_pos == -1) {
             retval = READSTAT_ERROR_SEEK;
@@ -1478,6 +1492,47 @@ cleanup:
     return retval;
 }
 
+/* Redivis: parses every page in a single forward pass, for input that can't seek. Normally, pass 1 collects the
+ * column text from all of the metadata pages (at the start of the file, and AMD pages at the end) before pass 2 parses
+ * the column definitions and rows. Here each page gets pass 1 and then pass 2, so column text must appear on or before
+ * the page that first refers to it, and before the first row. That's how SAS lays out its files; one whose metadata was
+ * amended at the end fails to parse rather than producing wrong output. Rows moved to other pages aren't supported. */
+static readstat_error_t sas7bdat_parse_all_pages_stream(sas7bdat_ctx_t *ctx) {
+    readstat_error_t retval = READSTAT_OK;
+    readstat_io_t *io = ctx->io;
+    int64_t i;
+
+    for (i=0; i<ctx->page_count; i++) {
+        if (io->read(ctx->page, ctx->page_size, io->io_ctx) < ctx->page_size) {
+            retval = READSTAT_ERROR_READ;
+            goto cleanup;
+        }
+
+        uint16_t page_type = sas_read2(&ctx->page[ctx->page_header_size-8], ctx->bswap);
+        if ((page_type & SAS_PAGE_TYPE_MASK) != SAS_PAGE_TYPE_DATA && !(page_type & SAS_PAGE_TYPE_COMP)) {
+            if ((retval = sas7bdat_parse_page_pass1(ctx->page, ctx->page_size, ctx)) != READSTAT_OK) {
+                goto error;
+            }
+        }
+        if ((retval = sas7bdat_parse_page_pass2(ctx->page, ctx->page_size, ctx)) != READSTAT_OK) {
+            goto error;
+        }
+        if (ctx->row_limit > 0 && ctx->parsed_row_count == ctx->row_limit)
+            break;
+    }
+    goto cleanup;
+
+error:
+    if (ctx->handle.error && retval != READSTAT_ERROR_USER_ABORT) {
+        snprintf(ctx->error_buf, sizeof(ctx->error_buf), "ReadStat: Error parsing page %" PRId64 ", bytes %" PRId64
+                "-%" PRId64, i, ctx->header_size + i*ctx->page_size, ctx->header_size + (i+1)*ctx->page_size - 1);
+        ctx->handle.error(ctx->error_buf, ctx->user_ctx);
+    }
+cleanup:
+
+    return retval;
+}
+
 readstat_error_t readstat_parse_sas7bdat(readstat_parser_t *parser, const char *path, void *user_ctx) {
     int64_t last_examined_page_pass1 = 0;
     readstat_error_t retval = READSTAT_OK;
@@ -1507,15 +1562,10 @@ readstat_error_t readstat_parse_sas7bdat(readstat_parser_t *parser, const char *
     }
 
     if ((ctx->file_size = io->seek(0, READSTAT_SEEK_END, io->io_ctx)) == -1) {
-        retval = READSTAT_ERROR_SEEK;
-        if (ctx->handle.error) {
-            snprintf(ctx->error_buf, sizeof(ctx->error_buf), "ReadStat: Failed to seek to end of file");
-            ctx->handle.error(ctx->error_buf, ctx->user_ctx);
-        }
-        goto cleanup;
-    }
-
-    if (io->seek(0, READSTAT_SEEK_SET, io->io_ctx) == -1) {
+        /* Redivis: the input can't seek, e.g. it's a pipe, so parse it in a single forward pass. Its IO handlers
+         * must still report the current position, and seek forward (e.g. by reading and discarding) */
+        ctx->is_stream = 1;
+    } else if (io->seek(0, READSTAT_SEEK_SET, io->io_ctx) == -1) {
         retval = READSTAT_ERROR_SEEK;
         if (ctx->handle.error) {
             snprintf(ctx->error_buf, sizeof(ctx->error_buf), "ReadStat: Failed to seek to beginning of file");
@@ -1556,6 +1606,20 @@ readstat_error_t readstat_parse_sas7bdat(readstat_parser_t *parser, const char *
     if (ctx->output_encoding && strcmp(input_encoding, ctx->output_encoding) != 0) {
         iconv_t converter = iconv_open(ctx->output_encoding, input_encoding);
         if (converter == (iconv_t)-1) {
+            /* Redivis: glibc's iconv lacks some of these encodings, but has them (or a superset) under other names */
+            static const char *aliases[][2] = {
+                { "MACROMAN", "MACINTOSH" },
+                { "MACUKRAINE", "MAC-UK" },
+                { "MACICELAND", "MAC-IS" },
+                { "CP942", "IBM943" },
+                { "CP1381", "GBK" }
+            };
+            for (size_t i=0; i<sizeof(aliases)/sizeof(aliases[0]) && converter == (iconv_t)-1; i++) {
+                if (strcmp(input_encoding, aliases[i][0]) == 0)
+                    converter = iconv_open(ctx->output_encoding, aliases[i][1]);
+            }
+        }
+        if (converter == (iconv_t)-1) {
             retval = READSTAT_ERROR_UNSUPPORTED_CHARSET;
             goto cleanup;
         }
@@ -1565,6 +1629,13 @@ readstat_error_t readstat_parse_sas7bdat(readstat_parser_t *parser, const char *
     if ((retval = readstat_convert(ctx->table_name, sizeof(ctx->table_name),
                 hinfo->table_name, sizeof(hinfo->table_name), ctx->converter)) != READSTAT_OK) {
         goto cleanup;
+    }
+
+    if (ctx->is_stream) {
+        if ((retval = sas7bdat_parse_all_pages_stream(ctx)) != READSTAT_OK) {
+            goto cleanup;
+        }
+        goto finish;
     }
 
     if ((retval = sas7bdat_parse_meta_pages_pass1(ctx, &last_examined_page_pass1)) != READSTAT_OK) {
@@ -1588,7 +1659,8 @@ readstat_error_t readstat_parse_sas7bdat(readstat_parser_t *parser, const char *
     if ((retval = sas7bdat_parse_all_pages_pass2(ctx)) != READSTAT_OK) {
         goto cleanup;
     }
-    
+
+finish:
     if ((retval = sas7bdat_submit_columns_if_needed(ctx, 0)) != READSTAT_OK) {
         goto cleanup;
     }

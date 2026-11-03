@@ -317,7 +317,7 @@ readstat_error_t read_file(rt_parse_ctx_t *parse_ctx, long format) {
 
     readstat_set_open_handler(parser, rt_open_handler);
     readstat_set_close_handler(parser, rt_close_handler);
-    readstat_set_seek_handler(parser, rt_seek_handler);
+    readstat_set_seek_handler(parser, parse_ctx->is_stream ? rt_stream_seek_handler : rt_seek_handler);
     readstat_set_read_handler(parser, rt_read_handler);
     readstat_set_update_handler(parser, rt_update_handler);
     readstat_set_io_ctx(parser, parse_ctx->buffer_ctx);

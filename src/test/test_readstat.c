@@ -106,6 +106,24 @@ int main(int argc, char *argv[]) {
                     if (error != READSTAT_OK)
                         break;
 
+                    /* Redivis: SAS7BDAT files can also be parsed as a stream, in a single forward pass */
+                    if ((f & RT_FORMAT_SAS7BDAT)) {
+                        /* Resetting empties the buffer, but the same file is read again */
+                        size_t used = buffer->used;
+                        parse_ctx_reset(parse_ctx, f);
+                        buffer->used = used;
+                        parse_ctx->is_stream = 1;
+                        error = read_file(parse_ctx, f);
+                        parse_ctx->is_stream = 0;
+                        /* Rows moved to another page need random access, so a stream reports them as a seek error */
+                        if (error == READSTAT_ERROR_SEEK && strstr(file->label, "moved")) {
+                            parse_ctx->errors_count = old_errors_count;
+                            error = READSTAT_OK;
+                        }
+                        if (error != READSTAT_OK)
+                            break;
+                    }
+
                     if (old_errors_count != parse_ctx->errors_count)
                         dump_buffer(buffer, f);
                 }
