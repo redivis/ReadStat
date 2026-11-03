@@ -25,6 +25,15 @@ sav_ctx_t *sav_ctx_init(sav_file_header_record_t *header, readstat_io_t *io) {
     if (ctx == NULL) {
         return NULL;
     }
+
+    if (memcmp(&header->rec_type, "$FL2", 4) == 0) {
+        ctx->format_version = 2;
+    } else if (memcmp(&header->rec_type, "$FL3", 4) == 0) {
+        ctx->format_version = 3;
+    } else {
+        sav_ctx_free(ctx);
+        return NULL;
+    }
     
     ctx->bswap = !(header->layout_code == 2 || header->layout_code == 3);
     ctx->endianness = (machine_is_little_endian() ^ ctx->bswap) ? READSTAT_ENDIAN_LITTLE : READSTAT_ENDIAN_BIG;
@@ -35,6 +44,11 @@ sav_ctx_t *sav_ctx_init(sav_file_header_record_t *header, readstat_io_t *io) {
         ctx->compression = READSTAT_COMPRESS_BINARY;
     }
     ctx->record_count = ctx->bswap ? byteswap4(header->ncases) : header->ncases;
+    if (ctx->record_count < 0 || ctx->record_count > INT32_MAX / 2) {
+        /* -1 means unknown; PSPP also treats implausibly large counts as unknown */
+        ctx->record_count = -1;
+    }
+    ctx->row_limit = -1;
     ctx->fweight_index = ctx->bswap ? byteswap4(header->weight_index) : header->weight_index;
 
     ctx->missing_double = SAV_MISSING_DOUBLE;
@@ -42,7 +56,6 @@ sav_ctx_t *sav_ctx_init(sav_file_header_record_t *header, readstat_io_t *io) {
     ctx->highest_double = SAV_HIGHEST_DOUBLE;
     
     ctx->bias = ctx->bswap ? byteswap_double(header->bias) : header->bias;
-    ctx->format_version = header->rec_type[3] == '3' ? 3 : 2;
     
     ctx->varinfo_capacity = SAV_VARINFO_INITIAL_CAPACITY;
     
@@ -50,6 +63,8 @@ sav_ctx_t *sav_ctx_init(sav_file_header_record_t *header, readstat_io_t *io) {
         sav_ctx_free(ctx);
         return NULL;
     }
+
+    ctx->mr_sets = NULL;
 
     ctx->io = io;
     
@@ -80,6 +95,28 @@ void sav_ctx_free(sav_ctx_t *ctx) {
         iconv_close(ctx->converter);
     if (ctx->variable_display_values) {
         free(ctx->variable_display_values);
+    }
+    if (ctx->mr_sets) {
+        for (size_t i = 0; i < ctx->multiple_response_sets_length; i++) {
+            if (ctx->mr_sets[i].name) {
+                free(ctx->mr_sets[i].name);
+            }
+            if (ctx->mr_sets[i].label) {
+                free(ctx->mr_sets[i].label);
+            }
+            if (ctx->mr_sets[i].counted_string) {
+                free(ctx->mr_sets[i].counted_string);
+            }
+            if (ctx->mr_sets[i].subvariables) {
+                for (size_t j = 0; j < ctx->mr_sets[i].num_subvars; j++) {
+                    if (ctx->mr_sets[i].subvariables[j]) {
+                        free(ctx->mr_sets[i].subvariables[j]);
+                    }
+                }
+                free(ctx->mr_sets[i].subvariables);
+            }
+        }
+        free(ctx->mr_sets);
     }
     free(ctx);
 }

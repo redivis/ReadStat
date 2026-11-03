@@ -1,7 +1,7 @@
 #include <stdlib.h>
-#include <strings.h>
 
 #include "../readstat.h"
+#include "../readstat_strings.h"
 #include "readstat_schema.h"
 
 #include "readstat_copy.h"
@@ -14,6 +14,11 @@
 
 readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
     const char *filepath, void *user_ctx, readstat_error_t *outError) {
+    if (parser->io->open(filepath, parser->io->io_ctx) == -1) {
+        if (outError)
+            *outError = READSTAT_ERROR_OPEN;
+        return NULL;
+    }
     readstat_schema_t *schema = NULL;
     unsigned char *bytes = NULL;
     readstat_error_t error = READSTAT_OK;
@@ -42,6 +47,7 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
     double double_value = NAN;
     uint64_t first_integer = 0;
     uint64_t integer = 0;
+    uint64_t range_values_remaining = MAX_VALUE_LABEL_RANGE_VALUES;
     int line_no = 0;
     unsigned char *line_start = p;
 
@@ -69,7 +75,12 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
         }
         
         action incr_integer {
-            integer = 10 * integer + (fc - '0');
+            /* Saturate rather than wrap so an overlong literal reads as "too big" */
+            if (integer > (INT64_MAX - (fc - '0')) / 10) {
+                integer = INT64_MAX;
+            } else {
+                integer = 10 * integer + (fc - '0');
+            }
         }
 
         action incr_hex_integer {
@@ -133,6 +144,7 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
         action handle_var {
             readstat_schema_entry_t *entry = readstat_schema_find_or_create_entry(schema, varname);
             entry->variable.type = var_type;
+            entry->variable.storage_width = var_len;
             entry->row = var_row;
             entry->col = var_col;
             entry->len = var_len;
@@ -140,6 +152,7 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
 
         action handle_var_len {
             readstat_schema_entry_t *entry = readstat_schema_find_or_create_entry(schema, varname);
+            entry->variable.storage_width = var_len;
             entry->len = var_len;
         }
 
@@ -155,14 +168,15 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
 
         action handle_value_label {
             error = submit_value_label(parser, labelset, label_type,
-                first_integer, integer, double_value, string_value, buf, user_ctx); 
+                first_integer, integer, double_value, string_value, buf,
+                &range_values_remaining, user_ctx);
             if (error != READSTAT_OK)
                 goto cleanup;
         }
         
-        single_quoted_string = "'" ( [^']* ) >{ str_start = fpc; } %{ str_len = fpc - str_start; } "'";
+        single_quoted_string = "'" ( ([^'] | "''")* ) >{ str_start = fpc; } %{ str_len = fpc - str_start; } "'";
         
-        double_quoted_string = "\"" ( [^"]* ) >{ str_start = fpc; } %{ str_len = fpc - str_start; } "\"";
+        double_quoted_string = "\"" ( ([^"] | '""')* ) >{ str_start = fpc; } %{ str_len = fpc - str_start; } "\"";
 
         unquoted_string = [A-Za-z] [_A-Za-z0-9\.]*;
         
@@ -170,13 +184,17 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
 
         hex_string = "'" ( [0-9A-Fa-f]+ ) >start_integer $incr_hex_integer "'x";
         
-        newline = ( "\n" | "\r\n" ) %{ line_no++; line_start = p; };
+        newline = ( "\r"? "\n" | "\r" "\n"? ) %{ line_no++; line_start = p; };
                                        
         missing_value = "." [A-Z]?;
         
         identifier = ( [$_A-Za-z] [_A-Za-z0-9]* ) >{ str_start = fpc; } %{ str_len = fpc - str_start; };
 
         identifier_eval = "&"? identifier "."?;
+
+        identifier_placeholder = "*"+ identifier "*"+;
+
+        data_identifier = ([_A-Za-z] [_A-Za-z0-9]* "." [_A-Za-z] [_A-Za-z0-9]*) >{ str_start = fpc; } %{ str_len = fpc - str_start; };
         
         integer = [0-9]+ >start_integer $incr_integer;
         
@@ -193,7 +211,7 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
 
         labelset = identifier %copy_labelset;
 
-        arg = identifier %copy_argname (whitespace* "=" whitespace* (identifier_eval | quoted_string | hex_string | integer) >start_integer %handle_arg)?;
+        arg = identifier %copy_argname (whitespace* "=" whitespace* (identifier_eval | data_identifier | quoted_string | hex_string | integer) >start_integer %handle_arg)?;
 
         args = arg ( whitespace+ arg)*;
 
@@ -213,17 +231,23 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
 
         empty_cmd = ";";
 
-        value_label = ( "-" integer %{ label_type = LABEL_TYPE_DOUBLE; double_value = -integer; } |
+        missing_value_label = "." %{ label_type = -1; } whitespace* "=" whitespace* quoted_string %handle_value_label;
+
+        value_label = ( "-" integer %{ label_type = LABEL_TYPE_DOUBLE; double_value = -(double)integer; } |
                 integer %{ label_type = LABEL_TYPE_DOUBLE; double_value = integer; } |
                 integer whitespace+ "-" whitespace+ %{ first_integer = integer; } integer %{ label_type = LABEL_TYPE_RANGE; } |
                 unquoted_string %{ label_type = LABEL_TYPE_STRING; } %copy_string |
-                quoted_string %{ label_type = LABEL_TYPE_STRING; } %copy_string
+                quoted_string %{ label_type = LABEL_TYPE_STRING; } %copy_string |
+                "other" %{ label_type = LABEL_TYPE_OTHER; }
                 ) whitespace* "=" whitespace* quoted_string %handle_value_label;
 
         var_len = ("$" whitespace* integer %set_str | integer %set_dbl) %{ var_len = integer; };
 
-        value_cmd = "VALUE"i whitespace+ labelset whitespace+ ("(" args ")" whitespace*)?
-            value_label (whitespace+ value_label)* 
+        value_cmd = "VALUE"i whitespace+
+            labelset whitespace+
+            ("(" args ")" whitespace*)?
+            (value_label | missing_value_label)
+            (whitespace+ (value_label | missing_value_label))* 
             whitespace* ";";
         
         proc_format_cmd = "PROC"i whitespace+ "FORMAT"i whitespace* ( args whitespace* )? ";"
@@ -234,7 +258,7 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
 
         if_statement = "IF"i ( whitespace | identifier | "-"? integer | "(" | ")" | ".")+ ";";
 
-        data_cmd = "DATA"i (whitespace+ identifier_eval | unquoted_string | quoted_string )+
+        data_cmd = "DATA"i (whitespace+ (identifier_eval | identifier_placeholder | unquoted_string | quoted_string ) )+
             whitespace* ";";
 
         missing_cmd = "MISSING"i whitespace+ identifier 
@@ -247,7 +271,8 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
 
         length_spec = var whitespace+ var_len %handle_var_len;
 
-        length_cmd = "LENGTH"i whitespace+ length_spec (whitespace+ length_spec)*
+        length_cmd = "LENGTH"i (whitespace+ length_spec)*
+            (whitespace+ "DEFAULT" whitespace* "=" whitespace* integer)?
             whitespace* ";";
 
         label_spec = var whitespace* "=" whitespace* quoted_string %handle_var_label;
@@ -317,7 +342,7 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
                                        
         input_dbl_spec = "@" integer %copy_pos whitespace+ var whitespace+ (var_len | input_format_spec) "." %handle_var integer?;
 
-        input_txt_spec = var whitespace+ "$" whitespace+ integer %copy_pos "-" integer %set_len %set_str %handle_var;
+        input_txt_spec = var whitespace+ "$" whitespace* integer %copy_pos "-" integer %set_len %set_str %handle_var;
 
         row_spec = "#" integer %{ var_row = integer - 1; };
                                        
@@ -336,12 +361,22 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
                                        
         invalue_cmd = "INVALUE"i whitespace+ identifier whitespace+ invalue_spec (whitespace+ invalue_spec)* whitespace* ";";
 
+        tables_cmd = "TABLES"i whitespace+ identifier whitespace* ";";
+
+        modify_cmd = "MODIFY"i whitespace+ identifier whitespace* ";";
+
+        proc_freq_cmd = "PROC"i whitespace+ "FREQ"i (whitespace+ args) whitespace* ";" whitespace* tables_cmd?;
+
         proc_print_cmd = "PROC"i whitespace+ "PRINT"i (whitespace+ args) (whitespace+ "(" args ")")? 
             whitespace* ";";
 
         proc_contents_cmd = "PROC"i whitespace+ "CONTENTS"i (whitespace+ args) whitespace* ";";
 
+        proc_datasets_cmd = "PROC"i whitespace+ "DATASETS"i (whitespace+ args) whitespace* ";" whitespace* modify_cmd?;
+
         run_cmd = "RUN"i whitespace* ";";
+
+        quit_cmd = "QUIT"i whitespace* ";";
 
         command = 
             options_cmd |
@@ -361,9 +396,12 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
             length_cmd |
             input_cmd |
             invalue_cmd |
+            proc_freq_cmd |
             proc_print_cmd |
             proc_contents_cmd |
-            run_cmd;
+            proc_datasets_cmd |
+            run_cmd |
+            quit_cmd;
         
         main := ( true_whitespace | comment | command )*;
 
@@ -379,8 +417,8 @@ readstat_schema_t *readstat_parse_sas_commands(readstat_parser_t *parser,
         if (p == pe) {
             snprintf(error_buf, sizeof(error_buf), "Error parsing SAS command file (end-of-file unexpectedly reached)");
         } else {
-            snprintf(error_buf, sizeof(error_buf), "Error parsing SAS command file around line #%d, col #%ld (%c)",
-                    line_no + 1, (long)(p - line_start + 1), *p);
+            snprintf(error_buf, sizeof(error_buf), "Error parsing SAS command file around line #%d, col #%ld (0x%02x = %c)",
+                    line_no + 1, (long)(p - line_start + 1), *p, *p);
         }
         if (parser->handlers.error) {
             parser->handlers.error(error_buf, user_ctx);

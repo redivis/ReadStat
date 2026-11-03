@@ -8,7 +8,7 @@ static inline int is_leap(int year) {
     return ((year % 4 == 0 && year % 100 != 0) || year % 400 ==0);
 }
 
-void test_dta_dates() {
+void test_dta_dates(void) {
     int daysPerMonth[] =     {31,28,31,30,31,30,31,31,30,31,30,31};
     int daysPerMonthLeap[] = {31,29,31,30,31,30,31,31,30,31,30,31};
     char buf[1024];

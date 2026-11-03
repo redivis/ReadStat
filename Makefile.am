@@ -24,6 +24,7 @@ libreadstat_la_SOURCES = \
 	src/sas/readstat_xport.c \
 	src/sas/readstat_xport_read.c \
 	src/sas/readstat_xport_write.c \
+	src/sas/readstat_xport_parse_format.c \
 	src/spss/readstat_por.c \
 	src/spss/readstat_por_parse.c \
 	src/spss/readstat_por_read.c \
@@ -32,6 +33,7 @@ libreadstat_la_SOURCES = \
 	src/spss/readstat_sav_compress.c \
 	src/spss/readstat_sav_parse.c \
 	src/spss/readstat_sav_parse_timestamp.c \
+	src/spss/readstat_sav_parse_mr_name.c \
 	src/spss/readstat_sav_read.c \
 	src/spss/readstat_sav_write.c \
 	src/spss/readstat_spss.c \
@@ -57,7 +59,7 @@ endif
 
 if HAVE_RAGEL
 .rl.c:
-	$(AM_V_GEN)$(RAGEL) $(RAGELFLAGS) -C $< -o $@
+	$(AM_V_GEN)$(RAGEL) $(RAGELFLAGS) $< -o $@
 endif
 
 libreadstat_la_CFLAGS = -g -Wall @EXTRA_WARNINGS@ -Werror -pedantic-errors -std=c99
@@ -80,6 +82,21 @@ endif
 
 dist_man1_MANS = man/readstat.man man/extract_metadata.man
 
+EXTRA_DIST = \
+	resources/datetime.sas7bdat \
+	resources/strl_119.dta \
+	resources/binary_strl_118.dta \
+	resources/trailing_blanks_118.dta \
+	resources/value_labels_108.dta \
+	resources/value_labels_105.dta \
+	resources/compression_type_0x02.sas7bdat \
+	resources/compression_type_0x06.sas7bdat \
+	resources/compression_type_0x09.sas7bdat \
+	resources/compression_type_0x0d.sas7bdat \
+	resources/format_with_default_32bit.sas7bcat \
+	resources/format_with_default_64bit.sas7bcat \
+	resources/sav_missing_continuations.sav
+
 include_HEADERS = src/readstat.h
 
 noinst_HEADERS = \
@@ -89,17 +106,20 @@ noinst_HEADERS = \
        src/readstat_iconv.h \
        src/readstat_io_unistd.h \
        src/readstat_malloc.h \
+       src/readstat_strings.h \
        src/readstat_writer.h \
        src/sas/ieee.h \
        src/sas/readstat_sas.h \
        src/sas/readstat_sas_rle.h \
        src/sas/readstat_xport.h \
+       src/sas/readstat_xport_parse_format.h \
        src/spss/readstat_por.h \
        src/spss/readstat_por_parse.h \
        src/spss/readstat_sav.h \
        src/spss/readstat_sav_compress.h \
        src/spss/readstat_sav_parse.h \
        src/spss/readstat_sav_parse_timestamp.h \
+       src/spss/readstat_sav_parse_mr_name.h \
        src/spss/readstat_spss.h \
        src/spss/readstat_spss_parse.h \
        src/spss/readstat_zsav_compress.h \
@@ -128,10 +148,13 @@ noinst_HEADERS = \
        src/bin/write/mod_xlsx.h \
        src/bin/write/module.h \
        src/bin/write/module_util.h \
+       src/bin/write/sas_values.h \
+       src/bin/util/main.h \
        src/bin/util/file_format.h \
        src/bin/util/quote_and_escape.h \
        src/bin/util/readstat_dta_days.h \
        src/bin/util/readstat_sav_date.h \
+       src/bin/util/stream_io.h \
        src/fuzz/fuzz_format.h \
        src/test/test_buffer.h \
        src/test/test_buffer_io.h \
@@ -161,12 +184,14 @@ readstat_SOURCES = \
 	src/bin/write/mod_csv.c \
 	src/bin/write/mod_readstat.c \
 	src/bin/write/module_util.c \
+	src/bin/write/sas_values.c \
 	src/bin/util/file_format.c \
 	src/bin/util/quote_and_escape.c \
 	src/bin/util/readstat_dta_days.c \
-	src/bin/util/readstat_sav_date.c
+	src/bin/util/readstat_sav_date.c \
+	src/bin/util/stream_io.c
 
-readstat_LDADD = libreadstat.la
+readstat_LDADD = libreadstat.la -lm
 readstat_CFLAGS = -DREADSTAT_VERSION=\"@READSTAT_VERSION@\" -Wall -Werror -pedantic-errors -std=c99
 if HAVE_ZLIB
 readstat_CFLAGS += -DHAVE_ZLIB=1
@@ -272,7 +297,8 @@ EXTRA_PROGRAMS += \
 	fuzz_grammar_por_double \
 	fuzz_grammar_sav_date \
 	fuzz_grammar_sav_time \
-	fuzz_grammar_spss_format
+	fuzz_grammar_spss_format \
+	fuzz_grammar_xport_format
 
 # Force C++ linking for fuzz targets
 nodist_EXTRA_fuzz_compression_sas_rle_SOURCES = dummy.cxx
@@ -291,6 +317,7 @@ nodist_EXTRA_fuzz_grammar_por_double_SOURCES = dummy.cxx
 nodist_EXTRA_fuzz_grammar_sav_date_SOURCES = dummy.cxx
 nodist_EXTRA_fuzz_grammar_sav_time_SOURCES = dummy.cxx
 nodist_EXTRA_fuzz_grammar_spss_format_SOURCES = dummy.cxx
+nodist_EXTRA_fuzz_grammar_xport_format_SOURCES = dummy.cxx
 
 fuzz_grammar_dta_timestamp_SOURCES = \
 	src/fuzz/fuzz_grammar_dta_timestamp.c
@@ -326,6 +353,13 @@ fuzz_grammar_spss_format_SOURCES = \
 fuzz_grammar_spss_format_LDADD = libreadstat.la @LIB_FUZZING_ENGINE@
 fuzz_grammar_spss_format_LDFLAGS = -static
 fuzz_grammar_spss_format_CFLAGS = -g -Wall @EXTRA_WARNINGS@ -Werror -pedantic-errors -std=c99 @SANITIZERS@
+
+fuzz_grammar_xport_format_SOURCES = \
+	src/fuzz/fuzz_grammar_xport_format.c
+
+fuzz_grammar_xport_format_LDADD = libreadstat.la @LIB_FUZZING_ENGINE@
+fuzz_grammar_xport_format_LDFLAGS = -static
+fuzz_grammar_xport_format_CFLAGS = -g -Wall @EXTRA_WARNINGS@ -Werror -pedantic-errors -std=c99 @SANITIZERS@
 
 fuzz_format_dta_SOURCES = \
 	src/fuzz/fuzz_format.c \

@@ -27,11 +27,30 @@ static ssize_t write_data(const void *bytes, size_t len, void *ctx) {
 readstat_error_t write_file_to_buffer(rt_test_file_t *file, rt_buffer_t *buffer, long format) {
     readstat_error_t error = READSTAT_OK;
 
-    ck_hash_table_t *label_sets = ck_hash_table_init(100);
+    ck_hash_table_t *label_sets = ck_hash_table_init(100, 16);
 
     readstat_writer_t *writer = readstat_writer_init();
     readstat_set_data_writer(writer, &write_data);
-    readstat_writer_set_file_label(writer, file->label);
+    if ((format & RT_FORMAT_SAS7BCAT)) {
+        strncpy(file->label, "", 1);
+    } else {
+        /* Test labels double as dataset labels; cut them to what the format
+         * allows, the same way the read side compares them */
+        char file_label[RT_MAX_STRING];
+        size_t max_label_len = sizeof(file_label) - 1;
+        if (file->write_error == READSTAT_ERROR_LABEL_IS_TOO_LONG) {
+            /* The test wants the over-long label to reach the writer */
+        } else if ((format & (RT_FORMAT_DTA_104 | RT_FORMAT_DTA_105))) {
+            max_label_len = 31;
+        } else if ((format & RT_FORMAT_DTA_117_AND_OLDER)) {
+            max_label_len = 80;
+        }
+        snprintf(file_label, sizeof(file_label), "%.*s", (int)max_label_len, file->label);
+        /* Readers trim trailing blanks, so don't end the cut label on one */
+        while (file_label[0] && file_label[strlen(file_label)-1] == ' ')
+            file_label[strlen(file_label)-1] = '\0';
+        readstat_writer_set_file_label(writer, file_label);
+    }
     readstat_writer_set_table_name(writer, file->table_name);
     readstat_writer_set_error_handler(writer, &handle_error);
     if (file->timestamp.tm_year) {
@@ -58,7 +77,13 @@ readstat_error_t write_file_to_buffer(rt_test_file_t *file, rt_buffer_t *buffer,
                 readstat_label_double_value(r_label_set, 
                         readstat_double_value(label_set->value_labels[i].value),
                         label_set->value_labels[i].label);
-            } else if (label_set->type == READSTAT_TYPE_INT32) {
+            } else if (label_set->type == READSTAT_TYPE_FLOAT) {
+                readstat_label_double_value(r_label_set, 
+                        readstat_float_value(label_set->value_labels[i].value),
+                        label_set->value_labels[i].label);
+            } else if (label_set->type == READSTAT_TYPE_INT32 ||
+                    label_set->type == READSTAT_TYPE_INT16 ||
+                    label_set->type == READSTAT_TYPE_INT8) {
                 readstat_label_int32_value(r_label_set, 
                         readstat_int32_value(label_set->value_labels[i].value),
                         label_set->value_labels[i].label);
@@ -86,20 +111,26 @@ readstat_error_t write_file_to_buffer(rt_test_file_t *file, rt_buffer_t *buffer,
         readstat_label_set_t *label_set = (readstat_label_set_t *)ck_str_hash_lookup(column->label_set, label_sets);
 
         size_t max_len = 0;
-        if (column->type == READSTAT_TYPE_STRING) {
-            max_len = 8;
-            for (i=0; i<file->rows; i++) {
-                const char *value = readstat_string_value(column->values[i]);
-                if (value) {
-                    size_t len = strlen(value);
-                    if (len > max_len)
-                        max_len = len;
+        if (column->type == READSTAT_TYPE_STRING && column->zero_width) {
+            max_len = 0;
+        } else if (column->type == READSTAT_TYPE_STRING) {
+            if (column->user_width > 0) {
+                max_len = column->user_width;
+            } else {
+                max_len = 8;
+                for (i=0; i<file->rows; i++) {
+                    const char *value = readstat_string_value(column->values[i]);
+                    if (value) {
+                        size_t len = strlen(value);
+                        if (len > max_len)
+                            max_len = len;
+                    }
                 }
-            }
-            if (label_set) {
-                for (i=0; i<label_set->value_labels_count; i++) {
-                    if (label_set->value_labels[i].string_key_len > max_len)
-                        max_len = label_set->value_labels[i].string_key_len;
+                if (label_set) {
+                    for (i=0; i<label_set->value_labels_count; i++) {
+                        if (label_set->value_labels[i].string_key_len > max_len)
+                            max_len = label_set->value_labels[i].string_key_len;
+                    }
                 }
             }
         }
@@ -113,6 +144,10 @@ readstat_error_t write_file_to_buffer(rt_test_file_t *file, rt_buffer_t *buffer,
         readstat_variable_set_label_set(variable, label_set);
         if (column->format[0])
             readstat_variable_set_format(variable, column->format);
+        if (column->informat[0])
+            readstat_variable_set_informat(variable, column->informat);
+        if (column->display_width)
+            readstat_variable_set_display_width(variable, column->display_width);
 
         if (column->type == READSTAT_TYPE_STRING) {
             for (i=0; i<column->missing_ranges_count; i++) {
@@ -158,6 +193,7 @@ readstat_error_t write_file_to_buffer(rt_test_file_t *file, rt_buffer_t *buffer,
         readstat_writer_set_file_format_is_64bit(writer, !!(format & RT_FORMAT_SAS7BDAT_64BIT));
         error = readstat_begin_writing_sas7bdat(writer, buffer, file->rows);
     } else if ((format & RT_FORMAT_SAS7BCAT)) {
+        readstat_writer_set_file_format_is_64bit(writer, !!(format & RT_FORMAT_SAS7BCAT_64BIT));
         error = readstat_begin_writing_sas7bcat(writer, buffer);
     } else if ((format & RT_FORMAT_XPORT)) {
         readstat_writer_set_file_format_version(writer, sas_file_format_version(format));

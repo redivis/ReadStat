@@ -1,0 +1,198 @@
+name: build
+on: [ push, pull_request ]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [ clang, gcc, gcc-11, gcc-12, gcc-13, gcc-14 ]
+    steps:
+      - name: Add repository
+        run: sudo apt-add-repository -y "ppa:ubuntu-toolchain-r/test"
+      - name: Install packages
+        run: sudo apt install gcc-11 gcc-12 gcc-13 gcc-14
+      - uses: actions/checkout@v6
+      - name: Autoconf
+        run: autoreconf -i -f
+      - name: Configure
+        run: ./configure
+        env:
+          CC: ${{ matrix.compiler }}
+      - name: Make
+        run: make
+      - name: Run tests
+        id: make-check
+        run: make check
+        continue-on-error: true
+      - name: Upload test log
+        if: steps.make-check.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-suite-log-linux-${{ matrix.compiler }}
+          path: test-suite.log
+          retention-days: 5
+      - name: Generate corpus
+        run: make generate_corpus
+      - name: Fail if tests failed
+        if: steps.make-check.outcome == 'failure'
+        run: exit 1
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        compiler: [ clang, gcc ]
+    steps:
+      - name: Install packages
+        run: brew install automake libtool
+      - uses: actions/checkout@v6
+      - name: Autoconf
+        run: autoreconf -i -f
+      - name: Configure
+        run: ./configure
+        env:
+          CC: ${{ matrix.compiler }}
+      - name: Make
+        run: make
+      - name: Run tests
+        id: make-check
+        run: make check
+        continue-on-error: true
+      - name: Upload test log
+        if: steps.make-check.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-suite-log-macos-${{ matrix.compiler }}
+          path: test-suite.log
+          retention-days: 5
+      - name: Generate corpus
+        run: make generate_corpus
+      - name: Fail if tests failed
+        if: steps.make-check.outcome == 'failure'
+        run: exit 1
+  windows_msys:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - msystem: MSYS
+            packages: autotools base-devel gcc libiconv-devel zlib-devel
+          - msystem: MINGW64
+            packages: autotools base-devel mingw-w64-x86_64-gcc mingw-w64-x86_64-libiconv mingw-w64-x86_64-zlib
+          - msystem: UCRT64
+            packages: autotools base-devel mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-libiconv mingw-w64-ucrt-x86_64-zlib
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: ${{ matrix.packages }}
+      - uses: actions/checkout@v6
+      - name: Autoconf
+        run: autoreconf -i -f
+      - name: Configure
+        run: ./configure
+      - name: Make
+        run: make
+      - name: Test
+        id: make-check
+        run: make check
+        continue-on-error: true
+      - name: Upload test log
+        if: steps.make-check.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-suite-log-windows-${{ matrix.msystem }}
+          path: test-suite.log
+          retention-days: 5
+      - name: Fail if tests failed
+        if: steps.make-check.outcome == 'failure'
+        run: exit 1
+  windows_msvc:
+    runs-on: windows-latest
+    env:
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-cache,readwrite"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Compute vcpkg cache key
+        id: vcpkg-key
+        shell: pwsh
+        run: |
+          $commit = git -C "$env:VCPKG_INSTALLATION_ROOT" rev-parse --short HEAD
+          "key=vcpkg-${{ runner.os }}-$env:ImageVersion-$commit" >> $env:GITHUB_OUTPUT
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: ${{ steps.vcpkg-key.outputs.key }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          vcpkg install gettext libiconv libcsv libxlsxwriter zlib --triplet x64-windows
+          vcpkg integrate install
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Fix library filename and paths for MSVC
+        shell: pwsh
+        run: |
+          $libDir = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\lib"
+
+          if (Test-Path "$libDir\iconv.lib") {
+              Copy-Item "$libDir\iconv.lib" "$libDir\libiconv.lib" -Force
+          }
+  
+          # Depending on the zlib port version, the import library is named
+          # z.lib, zlib1.lib or zlibd.lib/zlib1d.lib; the projects link
+          # against zlib.lib/zlibd.lib
+          if (Test-Path "$libDir\z.lib") {
+              Copy-Item "$libDir\z.lib" "$libDir\zlib.lib" -Force
+          }
+          if (Test-Path "$libDir\zd.lib") {
+              Copy-Item "$libDir\zd.lib" "$libDir\zlibd.lib" -Force
+          }
+          if (Test-Path "$libDir\zlib1.lib") {
+              Copy-Item "$libDir\zlib1.lib" "$libDir\zlib.lib" -Force
+          }
+          if (Test-Path "$libDir\zlib1d.lib") {
+              Copy-Item "$libDir\zlib1d.lib" "$libDir\zlibd.lib" -Force
+          }
+  
+          if (-not (Test-Path "$libDir\zlib.lib")) {
+              Write-Host "##vso[task.logissue type=error]zlib.lib not found in $libDir after fix step"
+              Get-ChildItem $libDir -Filter *.lib | Select-Object -ExpandProperty Name
+              exit 1
+          }
+
+      - name: Build
+        run: |
+          MSBuild ./VS17/ReadStat.sln /p:Configuration=Release /p:Platform=x64 /nologo
+     
+      - name: Test
+        shell: pwsh
+        run: |
+          # pwsh only fails the step on the last command's exit code, so
+          # check each executable explicitly
+          $failed = @()
+          ./VS17/x64/Release/ReadStat_App.exe --version
+          if ($LASTEXITCODE -ne 0) { $failed += "ReadStat_App" }
+          $tests = @("double_decimals", "dta_days", "sav_date", "readstat")
+          foreach ($test in $tests) {
+            Write-Host "Running $test..."
+            & "./VS17/x64/Release/ReadStat_Test_$test.exe"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::$test exited with code $LASTEXITCODE"
+              $failed += $test
+            }
+          }
+          if ($failed.Count -gt 0) {
+            Write-Host "Failed: $($failed -join ', ')"
+            exit 1
+          }

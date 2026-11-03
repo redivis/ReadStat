@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 
 #include "../../readstat.h"
@@ -10,10 +9,14 @@
 #include "../util/readstat_dta_days.h"
 #include "../util/readstat_sav_date.h"
 #include "double_decimals.h"
+#include "sas_values.h"
+#include "mod_csv.h"
 
 typedef struct mod_csv_ctx_s {
     FILE *out_file;
     long var_count;
+    /* Redivis: format numeric values as SAS does (see sas_values.c) */
+    int sas_values;
 } mod_csv_ctx_t;
 
 static int accept_file(const char *filename);
@@ -40,9 +43,11 @@ static int accept_file(const char *filename) {
 }
 
 static void *ctx_init(const char *filename) {
-    mod_csv_ctx_t *mod_ctx = malloc(sizeof(mod_csv_ctx_t));
+    mod_csv_ctx_t *mod_ctx = calloc(1, sizeof(mod_csv_ctx_t));
     if (strcmp(filename, "-") == 0) {
         mod_ctx->out_file = stdout;
+        /* Redivis: a larger buffer than stdio's default, since this is usually a pipe carrying the whole file */
+        setvbuf(stdout, NULL, _IOFBF, 1 << 20);
     } else {
         mod_ctx->out_file = fopen(filename, "w");
     }
@@ -51,6 +56,10 @@ static void *ctx_init(const char *filename) {
         return NULL;
     }
     return mod_ctx;
+}
+
+void rs_mod_csv_set_sas_values(void *ctx, int sas_values) {
+    ((mod_csv_ctx_t *)ctx)->sas_values = sas_values;
 }
 
 static void finish_file(void *ctx) {
@@ -126,6 +135,11 @@ static int handle_value(int obs_index, readstat_variable_t *variable, readstat_v
         char days_str[255];
         readstat_dta_days_string(days, days_str, sizeof(days_str)-1);
         fprintf(mod_ctx->out_file, "%s", days_str);
+    } else if (type == READSTAT_TYPE_DOUBLE && mod_ctx->sas_values) {
+        char value_str[512];
+        if (sas_value_string(readstat_double_value(value), format, value_str, sizeof(value_str))) {
+            fprintf(mod_ctx->out_file, "%s", value_str);
+        }
     } else if (type == READSTAT_TYPE_DOUBLE && format && 0 == strncmp("EDATE40", format, strlen("EDATE40"))) {
         double v = readstat_double_value(value);
         char date_str[255];

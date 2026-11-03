@@ -3,9 +3,16 @@
 #include <string.h>
 #include <stdio.h>
 
+#if defined(_MSC_VER)
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
+
 #include "readstat_sas_rle.h"
 
 #define SAS_RLE_COMMAND_COPY64          0
+#define SAS_RLE_COMMAND_COPY64_PLUS_4096 1
+#define SAS_RLE_COMMAND_COPY96          2
 #define SAS_RLE_COMMAND_INSERT_BYTE18   4
 #define SAS_RLE_COMMAND_INSERT_AT17     5
 #define SAS_RLE_COMMAND_INSERT_BLANK17  6
@@ -19,8 +26,12 @@
 #define SAS_RLE_COMMAND_INSERT_BLANK2  14
 #define SAS_RLE_COMMAND_INSERT_ZERO2   15
 
+#define MAX_INSERT_RUN 4112 // 4095 + 17
+#define MAX_COPY_RUN 4159 // 4095 + 64
+
 static size_t command_lengths[16] = {
     [SAS_RLE_COMMAND_COPY64] = 1,
+    [SAS_RLE_COMMAND_COPY64_PLUS_4096] = 1,
     [SAS_RLE_COMMAND_INSERT_BYTE18] = 2,
     [SAS_RLE_COMMAND_INSERT_AT17] = 1,
     [SAS_RLE_COMMAND_INSERT_BLANK17] = 1,
@@ -54,6 +65,10 @@ ssize_t sas_rle_decompress(void *output_buf, size_t output_len,
             case SAS_RLE_COMMAND_COPY64:
                 copy_len = (*input++) + 64 + length * 256;
                 break;
+            case SAS_RLE_COMMAND_COPY64_PLUS_4096:
+                copy_len = (*input++) + 64 + length * 256 + 4096;
+                break;
+            case SAS_RLE_COMMAND_COPY96: copy_len = length + 96; break;
             case SAS_RLE_COMMAND_INSERT_BYTE18:
                 insert_len = (*input++) + 18 + length * 256;
                 insert_byte = *input++;
@@ -122,7 +137,12 @@ ssize_t sas_rle_decompress(void *output_buf, size_t output_len,
 }
 
 static size_t sas_rle_measure_copy_run(size_t copy_run) {
-    return (copy_run > 64) + (copy_run > 0) + copy_run;
+    size_t len = 0;
+    while (copy_run >= MAX_COPY_RUN) {
+        len += 2 + MAX_COPY_RUN;
+        copy_run -= MAX_COPY_RUN;
+    }
+    return len + (copy_run > 64) + (copy_run > 0) + copy_run;
 }
 
 static size_t sas_rle_copy_run(unsigned char *output_buf, size_t offset,
@@ -130,6 +150,15 @@ static size_t sas_rle_copy_run(unsigned char *output_buf, size_t offset,
     unsigned char *out = output_buf + offset;
     if (output_buf == NULL)
         return sas_rle_measure_copy_run(copy_run);
+
+    while (copy_run >= MAX_COPY_RUN) {
+        *out++ = (SAS_RLE_COMMAND_COPY64 << 4) + 0x0F;
+        *out++ = 0xFF;
+        memcpy(out, copy, MAX_COPY_RUN);
+        out += MAX_COPY_RUN;
+        copy += MAX_COPY_RUN;
+        copy_run -= MAX_COPY_RUN;
+    }
 
     if (copy_run > 64) {
         int length = (copy_run - 64) / 256;
@@ -229,7 +258,7 @@ ssize_t sas_rle_compress(void *output_buf, size_t output_len,
         unsigned char c = *p;
         if (insert_run == 0) {
             insert_run = 1;
-        } else if (c == last_byte) {
+        } else if (c == last_byte && insert_run < MAX_INSERT_RUN) {
             insert_run++;
         } else {
             if (sas_rle_is_insert_run(last_byte, insert_run)) {

@@ -1,3 +1,4 @@
+#include "../readstat.h"
 
 typedef struct rt_buffer_s {
     size_t      used;
@@ -10,10 +11,12 @@ typedef struct rt_buffer_ctx_s {
     size_t       pos;
 } rt_buffer_ctx_t;
 
-rt_buffer_t *buffer_init();
+rt_buffer_t *buffer_init(void);
 void buffer_reset(rt_buffer_t *buffer);
 void buffer_grow(rt_buffer_t *buffer, size_t len);
 void buffer_free(rt_buffer_t *buffer);
 
 rt_buffer_ctx_t *buffer_ctx_init(rt_buffer_t *buffer);
 void buffer_ctx_reset(rt_buffer_ctx_t *buffer_ctx);
+
+readstat_error_t buffer_read_from_resource(rt_buffer_t *buffer, char *resource_name);

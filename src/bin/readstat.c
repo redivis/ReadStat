@@ -1,10 +1,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 #include <time.h>
-#include <sys/time.h>
+#if !defined _MSC_VER
+#   include <unistd.h>
+#   include <sys/time.h>
+#else
+#   include <sys/timeb.h>
+#   include <sys/types.h>
+#   include <winsock2.h>
+
+#   define __need_clock_t
+#   include <time.h>
+
+int gettimeofday(struct timeval* t, void* timezone)
+{
+    struct _timeb timebuffer;
+    _ftime_s(&timebuffer);
+    t->tv_sec = timebuffer.time;
+    t->tv_usec = 1000 * timebuffer.millitm;
+    return 0;
+}
+#endif
 #include <sys/stat.h>
 
 #include "../readstat.h"
@@ -26,6 +44,12 @@
 #endif
 
 #include "util/file_format.h"
+#include "util/main.h"
+#include "util/stream_io.h"
+
+#if defined _MSC_VER
+#define unlink _unlink
+#endif
 
 typedef struct rs_ctx_s {
     rs_module_t *module;
@@ -33,7 +57,59 @@ typedef struct rs_ctx_s {
     const char  *error_filename;
     long         row_count;
     long         var_count;
+    /* Redivis: where --metadata writes each variable's name and label, as JSON */
+    FILE        *metadata_file;
+    long         metadata_var_count;
 } rs_ctx_t;
+
+/* Redivis: an input filename of "-" reads standard input, whose format is given by --input-format. Only formats that
+ * can be parsed in a single forward pass are supported (currently SAS7BDAT), since standard input can't seek */
+#define STDIN_FILENAME "-"
+static rs_format_e stdin_format = RS_FORMAT_UNKNOWN;
+
+static int is_stdin(const char *filename) {
+    return filename && strcmp(filename, STDIN_FILENAME) == 0;
+}
+
+static rs_format_e input_format_for(const char *filename) {
+    return is_stdin(filename) ? stdin_format : readstat_format(filename);
+}
+
+/* Writes a JSON string, escaping what JSON requires */
+static void write_json_string(FILE *fp, const char *string) {
+    fputc('"', fp);
+    for (const unsigned char *p = (const unsigned char *)(string ? string : ""); *p; p++) {
+        if (*p == '"' || *p == '\\') {
+            fprintf(fp, "\\%c", *p);
+        } else if (*p < 0x20 || *p == 0x7f) {
+            fprintf(fp, "\\u%04x", *p);
+        } else {
+            fputc(*p, fp);
+        }
+    }
+    fputc('"', fp);
+}
+
+/* Redivis: writes a variable to the --metadata file, in the shape extract_metadata uses */
+static void write_variable_metadata(rs_ctx_t *rs_ctx, readstat_variable_t *variable) {
+    FILE *fp = rs_ctx->metadata_file;
+    const char *label = readstat_variable_get_label(variable);
+    const char *format = readstat_variable_get_format(variable);
+
+    fprintf(fp, "%s\n{\"type\": \"%s\", \"name\": ", rs_ctx->metadata_var_count ? "," : "",
+            readstat_variable_get_type_class(variable) == READSTAT_TYPE_CLASS_STRING ? "STRING" : "NUMERIC");
+    write_json_string(fp, readstat_variable_get_name(variable));
+    if (format && format[0]) {
+        fprintf(fp, ", \"format\": ");
+        write_json_string(fp, format);
+    }
+    if (label && label[0]) {
+        fprintf(fp, ", \"label\": ");
+        write_json_string(fp, label);
+    }
+    fprintf(fp, "}");
+    rs_ctx->metadata_var_count++;
+}
 
 rs_module_t *rs_module_for_filename(rs_module_t *modules, long module_count, const char *filename) {
     int i;
@@ -89,6 +165,9 @@ static int handle_value_label(const char *val_labels, readstat_value_t value,
 static int handle_variable(int index, readstat_variable_t *variable,
                            const char *val_labels, void *ctx) {
     rs_ctx_t *rs_ctx = (rs_ctx_t *)ctx;
+    if (rs_ctx->metadata_file) {
+        write_variable_metadata(rs_ctx, variable);
+    }
     if (rs_ctx->module->handle.variable) {
         return rs_ctx->module->handle.variable(index, variable, val_labels, rs_ctx->module_ctx);
     }
@@ -113,6 +192,10 @@ static int handle_value(int obs_index, readstat_variable_t *variable, readstat_v
 readstat_error_t parse_file(readstat_parser_t *parser, const char *input_filename, int input_format, void *ctx) {
     readstat_error_t error = READSTAT_OK;
 
+    if (is_stdin(input_filename) && (error = stream_io_init(parser)) != READSTAT_OK) {
+        return error;
+    }
+
     if (input_format == RS_FORMAT_DTA) {
         error = readstat_parse_dta(parser, input_filename, ctx);
     } else if (input_format == RS_FORMAT_SAV ||
@@ -131,7 +214,7 @@ readstat_error_t parse_file(readstat_parser_t *parser, const char *input_filenam
     return error;
 }
 
-static void print_version() {
+static void print_version(void) {
     fprintf(stdout, "ReadStat version " READSTAT_VERSION "\n");
 }
 
@@ -166,6 +249,14 @@ static void print_usage(const char *cmd) {
 
     fprintf(stdout, "\n  Convert a text file with column metadata stored in a SAS command files, SPSS command file, or Stata dictionary file:\n");
     fprintf(stdout, "\n     %s input.xxx metadata.(dct|sas|sps) output.(" OUTPUT_FORMATS ")\n", cmd);
+
+    fprintf(stdout, "\n  Convert a SAS7BDAT file read from standard input (e.g. a pipe):\n");
+    fprintf(stdout, "\n     %s --input-format sas7bdat - output.(csv|-)\n", cmd);
+
+    fprintf(stdout, "\n  Options, before the filenames:\n");
+    fprintf(stdout, "\n     -f                     Overwrite the output file if it exists");
+    fprintf(stdout, "\n     --input-format <ext>   The format of standard input (an input filename of -): sas7bdat");
+    fprintf(stdout, "\n     --metadata <file>      Also write each variable's name, type, format and label as JSON\n");
 
     fprintf(stdout, "\n  Convert a SAS7BDAT file with value labels stored in a separate SAS catalog file:\n");
     fprintf(stdout, "\n     %s input.sas7bdat catalog.sas7bcat output.(dta|por|sav|xpt"
@@ -233,7 +324,7 @@ cleanup:
 
 static readstat_error_t parse_text_plus_dct(const char *input_filename,
         const char *dct_filename, rs_ctx_t *rs_ctx) {
-    int dct_format = readstat_format(dct_filename);
+    rs_format_e dct_format = readstat_format(dct_filename);
     readstat_error_t error = READSTAT_OK;
     readstat_schema_t *schema = NULL;
     readstat_parser_t *parser = NULL;
@@ -283,7 +374,7 @@ cleanup:
 static readstat_error_t parse_binary_file(const char *input_filename,
         const char *catalog_filename, rs_ctx_t *rs_ctx) {
     readstat_error_t error = READSTAT_OK;
-    int input_format = readstat_format(input_filename);
+    rs_format_e input_format = input_format_for(input_filename);
     readstat_parser_t *pass1_parser = readstat_parser_init();
     readstat_parser_t *pass2_parser = readstat_parser_init();
 
@@ -292,7 +383,10 @@ static readstat_error_t parse_binary_file(const char *input_filename,
     readstat_set_value_label_handler(pass1_parser, &handle_value_label);
     readstat_set_fweight_handler(pass1_parser, &handle_fweight);
 
-    if (catalog_filename) {
+    if (is_stdin(input_filename) && !catalog_filename) {
+        /* Redivis: standard input can only be read once. SAS7BDAT files hold no value labels or fweights anyway */
+        rs_ctx->error_filename = input_filename;
+    } else if (catalog_filename) {
         error = parse_file(pass1_parser, catalog_filename, RS_FORMAT_SAS_CATALOG, rs_ctx);
         rs_ctx->error_filename = catalog_filename;
     } else {
@@ -324,7 +418,7 @@ cleanup:
 }
 
 static int convert_file(const char *input_filename, const char *catalog_filename, const char *output_filename,
-        rs_module_t *modules, int modules_count, int force) {
+        const char *metadata_filename, rs_module_t *modules, int modules_count, int force) {
     readstat_error_t error = READSTAT_OK;
     struct timeval start_time, end_time;
     rs_module_t *module = rs_module_for_filename(modules, modules_count, output_filename);
@@ -352,6 +446,21 @@ static int convert_file(const char *input_filename, const char *catalog_filename
     rs_ctx->module = module;
     rs_ctx->module_ctx = module_ctx;
 
+    /* Redivis: write SAS values as dates and exact decimals, as Redivis's previous SAS converter did */
+    if (module->init == rs_mod_csv.init && input_format_for(input_filename) == RS_FORMAT_SAS_DATA) {
+        rs_mod_csv_set_sas_values(module_ctx, 1);
+    }
+
+    if (metadata_filename) {
+        if ((rs_ctx->metadata_file = fopen(metadata_filename, "w")) == NULL) {
+            error = READSTAT_ERROR_OPEN;
+            rs_ctx->error_filename = metadata_filename;
+            goto cleanup;
+        }
+        fprintf(rs_ctx->metadata_file, "{\"type\": \"%s\", \"variables\": [",
+                readstat_format_name(input_format_for(input_filename)));
+    }
+
     if (is_json(catalog_filename)) {
 #if HAVE_CSVREADER
         error = parse_csv_plus_json(input_filename, catalog_filename, readstat_format(output_filename), rs_ctx);
@@ -373,8 +482,10 @@ cleanup:
     if (module->finish) {
         module->finish(rs_ctx->module_ctx);
     }
-
-    free(rs_ctx);
+    if (rs_ctx->metadata_file) {
+        fprintf(rs_ctx->metadata_file, "\n]}\n");
+        fclose(rs_ctx->metadata_file);
+    }
 
     if (error != READSTAT_OK) {
         if (file_exists) {
@@ -383,15 +494,31 @@ cleanup:
             fprintf(stderr, "Error processing %s: %s\n", rs_ctx->error_filename, readstat_error_message(error));
             unlink(output_filename);
         }
+
+	free(rs_ctx);
+
         return 1;
     }
 
+    free(rs_ctx);
+
     return 0;
+}
+
+size_t readstat_strftime(char *s, size_t maxsize, const char *format, time_t timestamp) {
+#if !defined _MSC_VER
+    return strftime(s, maxsize, format, localtime(&timestamp));
+#else
+    struct tm ltm;
+    localtime_s(&ltm, &timestamp);
+    return strftime(s, maxsize, format, &ltm);
+#endif
 }
 
 static int dump_metadata(readstat_metadata_t *metadata, void *ctx) {
     printf("Columns: %d\n", readstat_get_var_count(metadata));
     printf("Rows: %d\n", readstat_get_row_count(metadata));
+    const char *table_name = readstat_get_table_name(metadata);
     const char *file_label = readstat_get_file_label(metadata);
     const char *orig_encoding = readstat_get_file_encoding(metadata);
     long version = readstat_get_file_format_version(metadata);
@@ -399,8 +526,15 @@ static int dump_metadata(readstat_metadata_t *metadata, void *ctx) {
     readstat_compress_t compression = readstat_get_compression(metadata);
     readstat_endian_t endianness = readstat_get_endianness(metadata);
 
+    if (table_name && table_name[0]) {
+        if (*(rs_format_e *)ctx == RS_FORMAT_SAS_CATALOG) {
+            printf("Catalog name: %s\n", table_name);
+        } else {
+            printf("Table name: %s\n", table_name);
+        }
+    }
     if (file_label && file_label[0]) {
-        printf("File label: %s\n", file_label);
+        printf("Table label: %s\n", file_label);
     }
     if (version) {
         printf("Format version: %ld\n", version);
@@ -420,14 +554,14 @@ static int dump_metadata(readstat_metadata_t *metadata, void *ctx) {
     }
     if (timestamp) {
         char buffer[128];
-        strftime(buffer, sizeof(buffer), "%d %b %Y %H:%M", localtime(&timestamp));
+        readstat_strftime(buffer, sizeof(buffer), "%d %b %Y %H:%M", timestamp);
         printf("Timestamp: %s\n", buffer);
     }
     return 0;
 }
 
 static int dump_file(const char *input_filename) {
-    int input_format = readstat_format(input_filename);
+    rs_format_e input_format = readstat_format(input_filename);
     readstat_parser_t *parser = readstat_parser_init();
     readstat_error_t error = READSTAT_OK;
 
@@ -436,7 +570,7 @@ static int dump_file(const char *input_filename) {
     readstat_set_error_handler(parser, &handle_error);
     readstat_set_metadata_handler(parser, &dump_metadata);
 
-    error = parse_file(parser, input_filename, input_format, NULL);
+    error = parse_file(parser, input_filename, input_format, &input_format);
 
     readstat_parser_free(parser);
 
@@ -448,10 +582,11 @@ static int dump_file(const char *input_filename) {
     return 0;
 }
 
-int main(int argc, char** argv) {
+int portable_main(int argc, char** argv) {
     char *input_filename = NULL;
     char *catalog_filename = NULL;
     char *output_filename = NULL;
+    char *metadata_filename = NULL;
 
     rs_module_t *modules = NULL;
     long modules_count = 2;
@@ -481,11 +616,34 @@ int main(int argc, char** argv) {
     }
     if (argc > 1) {
         int argpos = 1;
-        if (strcmp(argv[argpos], "-f") == 0) {
-            force = 1;
-            argpos++;
+        /* Redivis: options may come in any order, before the filenames */
+        while (argpos < argc) {
+            if (strcmp(argv[argpos], "-f") == 0) {
+                force = 1;
+                argpos++;
+            } else if (strcmp(argv[argpos], "--input-format") == 0 && argpos + 1 < argc) {
+                char extension[32];
+                snprintf(extension, sizeof(extension), ".%s", argv[argpos+1]);
+                stdin_format = readstat_format(extension);
+                if (stdin_format != RS_FORMAT_SAS_DATA) {
+                    fprintf(stderr, "Unsupported --input-format %s; standard input can only be read as sas7bdat\n",
+                            argv[argpos+1]);
+                    free(modules);
+                    return 1;
+                }
+                argpos += 2;
+            } else if (strcmp(argv[argpos], "--metadata") == 0 && argpos + 1 < argc) {
+                metadata_filename = argv[argpos+1];
+                argpos += 2;
+            } else {
+                break;
+            }
         }
-        if (argpos + 1 == argc) {
+        if (argpos + 2 == argc && is_stdin(argv[argpos]) && stdin_format != RS_FORMAT_UNKNOWN &&
+                can_write(modules, modules_count, argv[argpos+1])) {
+            input_filename = argv[argpos];
+            output_filename = argv[argpos+1];
+        } else if (argpos + 1 == argc) {
             if (can_read(argv[argpos])) {
                 input_filename = argv[argpos];
             }
@@ -508,7 +666,7 @@ int main(int argc, char** argv) {
 
     int ret;
     if (output_filename) {
-        ret = convert_file(input_filename, catalog_filename, output_filename,
+        ret = convert_file(input_filename, catalog_filename, output_filename, metadata_filename,
                 modules, modules_count, force);
     } else if (input_filename) {
         ret = dump_file(input_filename); 
