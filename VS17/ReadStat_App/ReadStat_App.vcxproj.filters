@@ -72,6 +72,12 @@
     <ClCompile Include="..\..\src\bin\util\readstat_sav_date.c">
       <Filter>Source Files\util</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\bin\util\stream_io.c">
+      <Filter>Source Files\util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\bin\write\sas_values.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\src\bin\extract_metadata.h">

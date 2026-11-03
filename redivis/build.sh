@@ -2,7 +2,7 @@
 # Redivis: builds the readstat and extract_metadata binaries into dist/readstat-<version>-linux-<arch>.tar.gz, with a
 #   .sha256 beside it. Run from the repo root in a Debian trixie container, the OS of Redivis's app image; see
 #   .github/workflows/release.yml. libreadstat is linked statically, so the binaries only need glibc, libcsv3 and zlib
-# Usage: redivis/build.sh <version>
+# Usage: redivis/build.sh <version>, which names the tarball
 set -euo pipefail
 
 version="$1"

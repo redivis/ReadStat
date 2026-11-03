@@ -34,6 +34,8 @@
     <ClCompile Include="..\..\src\bin\write\module_util.c" />
     <ClCompile Include="..\..\src\bin\util\file_format.c" />
     <ClCompile Include="..\..\src\bin\util\quote_and_escape.c" />
+    <ClCompile Include="..\..\src\bin\util\stream_io.c" />
+    <ClCompile Include="..\..\src\bin\write\sas_values.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\src\bin\extract_metadata.h" />
@@ -53,6 +55,8 @@
     <ClInclude Include="..\..\src\bin\write\json\write_value_labels.h" />
     <ClInclude Include="..\..\src\bin\write\mod_csv.h" />
     <ClInclude Include="..\..\src\bin\write\mod_readstat.h" />
+    <ClInclude Include="..\..\src\bin\write\sas_values.h" />
+    <ClInclude Include="..\..\src\bin\util\stream_io.h" />
     <ClInclude Include="..\..\src\bin\write\mod_xlsx.h" />
     <ClInclude Include="..\..\src\bin\write\module.h" />
     <ClInclude Include="..\..\src\bin\write\module_util.h" />
